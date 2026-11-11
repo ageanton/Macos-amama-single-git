@@ -1,5 +1,3 @@
-G,AR41
-
 You are updating a GitHub Actions workflow file (`.github/workflows/build.yml`) that compiles the native macOS Swift 6 application **Motif**, this part is incomplete so don't do the editing yet. the next part will come
 
 ### STRICT OPERATING INSTRUCTIONS:
