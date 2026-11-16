@@ -6169,3 +6169,3340 @@ jobs:
                                                       withAnimation(.easeOut(duration: 0.12)) {
                                                           store.folders[fIdx].isExpanded.toggle()
                                                       }
+                                                      } label: {
+                                                          HStack(spacing: 6) {
+                                                              Text(folder.isExpanded ? "▾" : "▸")
+                                                                  .font(typo.mono(size: 10, weight: .semibold))
+                                                                  .foregroundColor(tokens.mutedText)
+                                                                  .frame(width: 10)
+                                                              Text(folder.name)
+                                                                  .font(typo.sans(size: 12, weight: .medium))
+                                                                  .foregroundColor(tokens.primaryText)
+                                                                  .lineLimit(1)
+                                                              Spacer()
+                                                              Text("\(folderChats.count)")
+                                                                  .font(typo.mono(size: 9.5))
+                                                                  .foregroundColor(tokens.mutedText)
+                                                          }
+                                                          .contentShape(Rectangle())
+                                                      }
+                                                      .buttonStyle(.plain)
+
+                                                      Button {
+                                                          store.folders[fIdx].isExpanded = true
+                                                          store.createNewSession(folderID: folder.id)
+                                                      } label: {
+                                                          Text("+")
+                                                              .font(typo.mono(size: 11, weight: .semibold))
+                                                              .foregroundColor(tokens.secondaryText)
+                                                              .frame(width: 18, height: 18)
+                                                      }
+                                                      .buttonStyle(.plain)
+                                                      .help("New folio in \(folder.name)")
+                                                  }
+                                                  .padding(.horizontal, 14)
+                                                  .frame(height: 26)
+                                                  .contextMenu {
+                                                      Button("New Folio in Workspace") {
+                                                          store.folders[fIdx].isExpanded = true
+                                                          store.createNewSession(folderID: folder.id)
+                                                      }
+                                                      Button("Rename Workspace") {
+                                                          folderRenameDraft = folder.name
+                                                          renamingFolderID = folder.id
+                                                          DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                                              isFolderRenameFocused = true
+                                                          }
+                                                      }
+                                                      Divider()
+                                                      Button("Delete Workspace (Keep Folios)", role: .destructive) {
+                                                          store.deleteWorkspace(folderID: folder.id)
+                                                      }
+                                                  }
+                                              }
+
+                                              if folder.isExpanded {
+                                                  ForEach(Array(folderChats.enumerated()), id: \.element.id) { idx, chat in
+                                                      chatRowItem(chat, indexNumber: idx + 1, indented: true)
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+
+                              // Section 02 // Numbered Folio Index
+                              VStack(alignment: .leading, spacing: 2) {
+                                  Text("02 // FOLIOS")
+                                      .font(typo.mono(size: 9.5, weight: .semibold))
+                                      .tracking(0.8)
+                                      .foregroundColor(tokens.mutedText)
+                                      .padding(.horizontal, 14)
+                                      .padding(.bottom, 3)
+
+                                  if unfiledSessions.isEmpty {
+                                      Text(searchQuery.isEmpty ? "No folios yet" : "No title matches")
+                                          .font(typo.sans(size: 11.5))
+                                          .foregroundColor(tokens.mutedText)
+                                          .padding(.horizontal, 14)
+                                          .padding(.vertical, 6)
+                                  } else {
+                                      ForEach(Array(unfiledSessions.enumerated()), id: \.element.id) { idx, session in
+                                          chatRowItem(session, indexNumber: idx + 1, indented: false)
+                                      }
+                                  }
+                              }
+                          }
+                          .padding(.vertical, 14)
+                          .background(OverlayScrollConfigurator(isDark: tokens.isEffectivelyDark).frame(width: 1, height: 1))
+                      }
+                      .onChange(of: isRenameFocused) { _, focused in
+                          if !focused, renamingSessionID != nil {
+                              commitActiveRenameIfNeeded()
+                          }
+                      }
+                  }
+              }
+
+              // MARK: - In-Place Archive View (Replaces Main List Cleanly Without Cluttering the Index)
+              private var archiveLedgerContent: some View {
+                  ScrollView(.vertical, showsIndicators: false) {
+                      VStack(alignment: .leading, spacing: 10) {
+                          HStack {
+                              Text("ARCHIVED FOLIOS (\(trashedSessions.count))")
+                                  .font(typo.mono(size: 9.5, weight: .semibold))
+                                  .tracking(0.8)
+                                  .foregroundColor(tokens.mutedText)
+
+                              Spacer()
+
+                              if !trashedSessions.isEmpty {
+                                  Button("EMPTY ALL") {
+                                      store.emptyTrashPermanently()
+                                  }
+                                  .font(typo.mono(size: 9.5, weight: .semibold))
+                                  .tracking(0.5)
+                                  .foregroundColor(tokens.secondaryText)
+                                  .buttonStyle(.plain)
+                              }
+                          }
+                          .padding(.horizontal, 14)
+
+                          if trashedSessions.isEmpty {
+                              Text("Archive is empty.")
+                                  .font(typo.sans(size: 12))
+                                  .foregroundColor(tokens.mutedText)
+                                  .padding(.horizontal, 14)
+                                  .padding(.top, 6)
+                          } else {
+                              ForEach(trashedSessions) { trashed in
+                                  HStack(spacing: 8) {
+                                      Text(trashed.title)
+                                          .font(typo.sans(size: 12))
+                                          .foregroundColor(tokens.secondaryText)
+                                          .lineLimit(1)
+
+                                      Spacer()
+
+                                      Button("RESTORE") {
+                                          store.restoreSessionFromTrash(trashed.id)
+                                      }
+                                      .font(typo.mono(size: 9.5, weight: .semibold))
+                                      .foregroundColor(tokens.primaryText)
+                                      .padding(.horizontal, 6)
+                                      .padding(.vertical, 3)
+                                      .background(
+                                          RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                              .fill(tokens.canvasBackground)
+                                      )
+                                      .overlay(
+                                          RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                              .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                      )
+                                      .buttonStyle(.plain)
+
+                                      Button {
+                                          store.permanentlyDeleteSession(trashed.id)
+                                      } label: {
+                                          Text("×")
+                                              .font(typo.mono(size: 12, weight: .semibold))
+                                              .foregroundColor(tokens.mutedText)
+                                              .frame(width: 18, height: 18)
+                                      }
+                                      .buttonStyle(.plain)
+                                      .help("Delete permanently")
+                                  }
+                                  .padding(.horizontal, 14)
+                                  .frame(height: 28)
+                              }
+                          }
+                      }
+                      .padding(.vertical, 14)
+                  }
+              }
+
+              private func commitActiveRenameIfNeeded() {
+                  if let activeFolderID = renamingFolderID {
+                      store.renameWorkspace(folderID: activeFolderID, newName: folderRenameDraft)
+                      renamingFolderID = nil
+                  }
+                  guard let activeID = renamingSessionID else { return }
+                  store.commitInlineRename(sessionID: activeID, proposedName: renameDraft)
+                  renamingSessionID = nil
+              }
+
+              @ViewBuilder
+              private func chatRowItem(_ session: ConversationSession, indexNumber: Int, indented: Bool) -> some View {
+                  let isSelected = store.selectedSessionID == session.id && !store.isSettingsViewActive
+                  let isGeneratingHere = store.isStreamingGeneration && store.streamingSessionID == session.id
+                  let isBranchedChat = session.title.lowercased().hasPrefix("branch")
+
+                  if renamingSessionID == session.id {
+                      HStack(spacing: 6) {
+                          TextField("Folio title", text: $renameDraft)
+                              .textFieldStyle(.plain)
+                              .font(typo.sans(size: 12.5, weight: .medium))
+                              .foregroundColor(tokens.primaryText)
+                              .focused($isRenameFocused)
+                              .onSubmit { commitActiveRenameIfNeeded() }
+                              .onExitCommand { renamingSessionID = nil }
+
+                          Button("OK") { commitActiveRenameIfNeeded() }
+                              .font(typo.mono(size: 9.5, weight: .semibold))
+                              .foregroundColor(tokens.primaryText)
+                              .buttonStyle(.plain)
+
+                          Button("×") { renamingSessionID = nil }
+                              .font(typo.mono(size: 11, weight: .semibold))
+                              .foregroundColor(tokens.mutedText)
+                              .buttonStyle(.plain)
+                      }
+                      .padding(.leading, indented ? 22 : 10)
+                      .padding(.trailing, 8)
+                      .frame(height: 28)
+                      .background(
+                          RoundedRectangle(cornerRadius: 3, style: .continuous)
+                              .fill(tokens.canvasBackground)
+                      )
+                      .overlay(
+                          RoundedRectangle(cornerRadius: 3, style: .continuous)
+                              .strokeBorder(tokens.strongBorder, lineWidth: 0.75)
+                      )
+                      .padding(.horizontal, 8)
+                  } else {
+                      Button {
+                          commitActiveRenameIfNeeded()
+                          store.selectedSessionID = session.id
+                      } label: {
+                          HStack(spacing: 7) {
+                              // 2pt Muted Carbon Bookmark Indicator on Active Folio
+                              Rectangle()
+                                  .fill(isSelected ? tokens.accentAction : Color.clear)
+                                  .frame(width: 2, height: 14)
+
+                              Text(isBranchedChat ? "↳" : String(format: "%02d", indexNumber))
+                                  .font(typo.mono(size: 9.5, weight: isSelected ? .semibold : .regular))
+                                  .foregroundColor(isSelected ? tokens.primaryText : tokens.mutedText)
+                                  .frame(width: 16, alignment: .leading)
+
+                              Text(session.title)
+                                  .font(typo.sans(size: 12.5, weight: isSelected ? .medium : .regular))
+                                  .foregroundColor(isSelected ? tokens.primaryText : tokens.secondaryText)
+                                  .lineLimit(1)
+
+                              Spacer(minLength: 4)
+
+                              if isGeneratingHere {
+                                  Rectangle()
+                                      .fill(tokens.primaryText)
+                                      .frame(width: 5, height: 5)
+                              }
+                          }
+                          .padding(.leading, indented ? 16 : 6)
+                          .padding(.trailing, 8)
+                          .frame(height: 28)
+                          .background(
+                              RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                  .fill(isSelected ? tokens.selectionPill : Color.clear)
+                          )
+                          .overlay(
+                              RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                  .strokeBorder(isSelected ? tokens.hairline : Color.clear, lineWidth: 0.75)
+                          )
+                          .contentShape(Rectangle())
+                      }
+                      .buttonStyle(.plain)
+                      .padding(.horizontal, 8)
+                      .contextMenu {
+                          Button("Rename Folio") {
+                              commitActiveRenameIfNeeded()
+                              renameDraft = session.title
+                              renamingSessionID = session.id
+                              DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                  isRenameFocused = true
+                              }
+                          }
+                          Button("Duplicate Folio") {
+                              store.duplicateSession(session.id)
+                          }
+                          Button("Export as Markdown…") {
+                              store.exportSessionAsMarkdown(session.id)
+                          }
+                          if !store.folders.isEmpty {
+                              Menu("Move to Workspace") {
+                                  Button("Unfiled Index") {
+                                      if let idx = store.sessions.firstIndex(where: { $0.id == session.id }) {
+                                          store.sessions[idx].folderID = nil
+                                          store.saveAllState()
+                                      }
+                                  }
+                                  ForEach(store.folders) { folder in
+                                      Button(folder.name) {
+                                          if let idx = store.sessions.firstIndex(where: { $0.id == session.id }) {
+                                              store.sessions[idx].folderID = folder.id
+                                              store.saveAllState()
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                          Divider()
+                          Button("Move to Archive", role: .destructive) {
+                              store.moveSessionToTrash(session.id)
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+      - name: Generate Plane 2 Editorial Reading Sheet, Hover-Reveal Footnotes & Drafting Plinth (EditorialConversationView.swift)
+        run: |
+          cat << 'EOF' > BlackMotif/Sources/BlackMotif/Views/EditorialConversationView.swift
+          import SwiftUI
+          import AppKit
+
+          private struct ComposerHeightPreferenceKey: PreferenceKey {
+              static var defaultValue: CGFloat = 84.0
+              static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+                  value = max(value, nextValue())
+              }
+          }
+
+          public struct EditorialConversationView: View {
+              @ObservedObject public var store: WorkstationStore
+              public let tokens: MotifTokens
+
+              @State private var editingMessageNodeID: UUID? = nil
+              @State private var editMessageDraft: String = ""
+              @State private var clearThinkingOnAssistantEdit: Bool = false
+              @State private var isEditBoxExpandedFull: Bool = false
+              @State private var copiedMessageID: UUID? = nil
+              @State private var confirmingDeleteNodeID: UUID? = nil
+              @State private var hoveredTurnNodeID: UUID? = nil
+              @State private var composerMeasuredHeight: CGFloat = 84.0
+
+              private var typo: TypographyConfiguration { store.typography }
+
+              public var body: some View {
+                  GeometryReader { geo in
+                      let canvasWidth = geo.size.width
+                      let isFullscreenOrWide = store.isWindowFullscreen || canvasWidth >= 1160
+                      let isCompactWindow = canvasWidth < 760
+                      let useLeftMetadataGutter = canvasWidth >= 820
+                      let horizontalOuterPadding: CGFloat = canvasWidth < 820 ? 18.0 : 32.0
+
+                      let opticalFontSize = typo.effectiveFontSize(
+                          forCanvasWidth: canvasWidth,
+                          isFullscreen: isFullscreenOrWide
+                      )
+                      let adaptiveProseWidth = typo.effectiveReadingWidth(
+                          forCanvasWidth: canvasWidth,
+                          isFullscreen: isFullscreenOrWide
+                      )
+                      let totalRowMaxWidth: CGFloat = useLeftMetadataGutter
+                          ? min(canvasWidth - (horizontalOuterPadding * 2), adaptiveProseWidth + 136)
+                          : adaptiveProseWidth
+
+                      VStack(spacing: 0) {
+                          if !store.isWindowFullscreen {
+                              Color.clear.frame(height: 26)
+                          }
+
+                          topHeaderBar(isCompactWindow: isCompactWindow)
+
+                          HairlineDivider(tokens: tokens)
+
+                          if let errBanner = store.humanReadableErrorBanner {
+                              errorNoticeBanner(text: errBanner)
+                          }
+
+                          if store.isSettingsViewActive {
+                              InGridSettingsPageView(store: store, tokens: tokens)
+                          } else if let session = store.activeSession {
+                              contextAndMemoryTopBanner(session: session)
+
+                              ZStack(alignment: .bottom) {
+                                  if session.activeBranchThread.isEmpty {
+                                      calmManuscriptTitleSheet(session: session, maxWidth: totalRowMaxWidth)
+                                  } else {
+                                      conversationStreamCanvas(
+                                          session: session,
+                                          useLeftGutter: useLeftMetadataGutter,
+                                          totalRowMaxWidth: totalRowMaxWidth,
+                                          horizontalPadding: horizontalOuterPadding,
+                                          opticalFontSize: opticalFontSize,
+                                          isFullscreenOrWide: isFullscreenOrWide
+                                      )
+                                  }
+
+                                  ArchitecturalDraftingPlinth(
+                                      store: store,
+                                      tokens: tokens,
+                                      maxBarWidth: totalRowMaxWidth,
+                                      activeFontSize: opticalFontSize,
+                                      isWideOrFullscreen: isFullscreenOrWide
+                                  )
+                                  .padding(.horizontal, horizontalOuterPadding)
+                                  .padding(.bottom, 16)
+                                  .background(
+                                      GeometryReader { compGeo in
+                                          Color.clear.preference(
+                                              key: ComposerHeightPreferenceKey.self,
+                                              value: compGeo.size.height
+                                          )
+                                      }
+                                  )
+                              }
+                              .onPreferenceChange(ComposerHeightPreferenceKey.self) { newH in
+                                  if abs(composerMeasuredHeight - newH) > 1.0 {
+                                      composerMeasuredHeight = newH
+                                  }
+                              }
+                          } else {
+                              strictNoSessionLandingGate
+                          }
+                      }
+                      .background(tokens.canvasBackground)
+                  }
+              }
+
+              // MARK: - Flush 40pt Top Header Band (Spec Cells That Open the Right Studio Ledger — Zero Balloon Popovers!)
+              private func topHeaderBar(isCompactWindow: Bool) -> some View {
+                  let leadingTrafficLightClearance: CGFloat = (!store.isSidebarVisible && !store.isWindowFullscreen) ? 78.0 : 18.0
+
+                  return HStack(alignment: .center, spacing: 8) {
+                      if !store.isSidebarVisible {
+                          Button {
+                              store.isSidebarVisible = true
+                          } label: {
+                              Image(systemName: "sidebar.left")
+                                  .font(.system(size: 11, weight: .medium))
+                                  .foregroundColor(tokens.secondaryText)
+                                  .frame(width: 24, height: 24)
+                                  .background(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .fill(tokens.elevatedSurface)
+                                  )
+                                  .overlay(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                  )
+                          }
+                          .buttonStyle(.plain)
+                          .help("Show Index Ledger (⌘\(store.shortcuts.toggleSidebarKey.uppercased()))")
+
+                          Button {
+                              store.createNewSession(folderID: nil)
+                          } label: {
+                              Image(systemName: "plus")
+                                  .font(.system(size: 11, weight: .semibold))
+                                  .foregroundColor(tokens.primaryText)
+                                  .frame(width: 24, height: 24)
+                                  .background(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .fill(tokens.elevatedSurface)
+                                  )
+                                  .overlay(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                  )
+                          }
+                          .buttonStyle(.plain)
+                          .help("New Folio (⌘\(store.shortcuts.newChatKey.uppercased()))")
+                      }
+
+                      if store.isSettingsViewActive {
+                          Text("CONFIGURATION // WORKSTATION PREFERENCES")
+                              .font(typo.mono(size: 10.5, weight: .semibold))
+                              .tracking(0.8)
+                              .foregroundColor(tokens.secondaryText)
+                              .lineLimit(1)
+
+                          Spacer()
+
+                          ArchitecturalKeyButton("← RETURN TO FOLIO", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                              withAnimation(.easeOut(duration: 0.14)) {
+                                  store.isSettingsViewActive = false
+                              }
+                          }
+                      } else {
+                          Text(store.activeSession?.title ?? "BlackMotif")
+                              .font(typo.display(size: 14.5, weight: .medium))
+                              .foregroundColor(tokens.primaryText)
+                              .lineLimit(1)
+
+                          Spacer(minLength: 8)
+
+                          if store.activeSession != nil {
+                              modelSpecHeaderCell(isCompactWindow: isCompactWindow)
+                          }
+
+                          memorySpecHeaderCell
+
+                          Button {
+                              withAnimation(.easeOut(duration: 0.14)) {
+                                  store.isStudioLedgerVisible.toggle()
+                              }
+                          } label: {
+                              Image(systemName: "sidebar.right")
+                                  .font(.system(size: 11, weight: .medium))
+                                  .foregroundColor(store.isStudioLedgerVisible ? tokens.primaryText : tokens.mutedText)
+                                  .frame(width: 24, height: 24)
+                                  .background(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .fill(store.isStudioLedgerVisible ? tokens.selectionPill : tokens.elevatedSurface.opacity(0.65))
+                                  )
+                                  .overlay(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                  )
+                          }
+                          .buttonStyle(.plain)
+                          .help("Toggle Studio Ledger (⌘\(store.shortcuts.toggleInspectorKey))")
+                      }
+                  }
+                  .padding(.leading, leadingTrafficLightClearance)
+                  .padding(.trailing, 16)
+                  .frame(height: 40)
+              }
+
+              // MARK: - Monochrome Model Spec Cell (With 2px Graphite Loading Sweep & Completion Rim Flicker)
+              @ViewBuilder
+              private func modelSpecHeaderCell(isCompactWindow: Bool) -> some View {
+                  let isLoading = store.isLoadingModelWeights
+                  let snap = store.memorySnapshot
+                  let loadFraction = isLoading ? CGFloat(min(0.99, max(0.03, snap.loadProgressAgainstTarget))) : 0.0
+                  let pct = Int(loadFraction * 100.0)
+                  let isResident = store.activeModelDescriptor?.residency == .activeInUnifiedRAM
+                  let flashOpacity = store.modelLoadCompletionRimFlashOpacity
+                  let isFlashingCompletion = flashOpacity > 0.01
+                  let activeModelTitle = isLoading
+                      ? LocalModelDescriptor.shortenModelName(store.loadingModelName)
+                      : (store.activeModelDescriptor?.shortDisplayName ?? "NO MODEL")
+
+                  Button {
+                      if store.isStudioLedgerVisible && store.activeRightLedgerTab == .studio {
+                          store.isStudioLedgerVisible = false
+                      } else {
+                          store.openStudioLedger(tab: .studio)
+                      }
+                  } label: {
+                      VStack(spacing: 0) {
+                          HStack(spacing: 6) {
+                              if isLoading {
+                                  Rectangle()
+                                      .fill(tokens.accentAction)
+                                      .frame(width: 5, height: 5)
+                              } else if isResident {
+                                  Rectangle()
+                                      .fill(tokens.primaryText)
+                                      .frame(width: 5, height: 5)
+                              } else {
+                                  Rectangle()
+                                      .strokeBorder(tokens.mutedText, lineWidth: 1.0)
+                                      .frame(width: 5, height: 5)
+                              }
+
+                              if !isCompactWindow {
+                                  Text("MODEL //")
+                                      .font(typo.mono(size: 9.5, weight: .medium))
+                                      .foregroundColor(tokens.mutedText)
+                              }
+
+                              Text(activeModelTitle)
+                                  .font(typo.mono(size: 10.5, weight: .semibold))
+                                  .foregroundColor(tokens.primaryText)
+                                  .lineLimit(1)
+                                  .frame(maxWidth: isCompactWindow ? 110 : 165, alignment: .leading)
+
+                              if isLoading {
+                                  Text("\(pct)%")
+                                      .font(typo.mono(size: 10, weight: .bold))
+                                      .foregroundColor(tokens.primaryText)
+                              }
+                          }
+                          .padding(.horizontal, 9)
+                          .frame(height: 23)
+
+                          // 2px Monochrome Graphite Progress Rule Along Bottom Edge When Loading
+                          if isLoading {
+                              GeometryReader { barGeo in
+                                  ZStack(alignment: .leading) {
+                                      Rectangle().fill(tokens.hairline)
+                                      Rectangle()
+                                          .fill(tokens.accentAction)
+                                          .frame(width: max(4, barGeo.size.width * loadFraction))
+                                  }
+                              }
+                              .frame(height: 2)
+                          }
+                      }
+                      .frame(height: 25)
+                      .background(
+                          RoundedRectangle(cornerRadius: 3, style: .continuous)
+                              .fill(
+                                  isFlashingCompletion
+                                      ? tokens.selectionPill.opacity(max(0.4, flashOpacity))
+                                      : (store.isStudioLedgerVisible && store.activeRightLedgerTab == .studio ? tokens.selectionPill : tokens.elevatedSurface.opacity(0.65))
+                              )
+                      )
+                      .overlay(
+                          RoundedRectangle(cornerRadius: 3, style: .continuous)
+                              .strokeBorder(
+                                  isFlashingCompletion
+                                      ? tokens.primaryText.opacity(max(0.45, flashOpacity))
+                                      : (isLoading ? tokens.strongBorder : tokens.hairline),
+                                  lineWidth: isFlashingCompletion ? 1.5 : 0.75
+                              )
+                      )
+                  }
+                  .buttonStyle(.plain)
+                  .help("Inspect or switch model & runtime parameters in Studio Ledger")
+              }
+
+              // MARK: - Monochrome Memory Spec Cell (Opens `MEMORY` Tab in Right Studio Ledger)
+              private var memorySpecHeaderCell: some View {
+                  let snap = store.memorySnapshot
+                  return Button {
+                      if store.isStudioLedgerVisible && store.activeRightLedgerTab == .memory {
+                          store.isStudioLedgerVisible = false
+                      } else {
+                          store.openStudioLedger(tab: .memory)
+                      }
+                  } label: {
+                      HStack(spacing: 5) {
+                          Text("MEM //")
+                              .font(typo.mono(size: 9.5, weight: .medium))
+                              .foregroundColor(tokens.mutedText)
+
+                          Text(String(format: "%.1f GB FREE", snap.headroomGB))
+                              .font(typo.mono(size: 10.5, weight: .semibold))
+                              .foregroundColor(tokens.primaryText)
+                      }
+                      .padding(.horizontal, 9)
+                      .frame(height: 25)
+                      .background(
+                          RoundedRectangle(cornerRadius: 3, style: .continuous)
+                              .fill(store.isStudioLedgerVisible && store.activeRightLedgerTab == .memory ? tokens.selectionPill : tokens.elevatedSurface.opacity(0.65))
+                      )
+                      .overlay(
+                          RoundedRectangle(cornerRadius: 3, style: .continuous)
+                              .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                      )
+                  }
+                  .buttonStyle(.plain)
+                  .help("Open Unified Memory Telemetry in Studio Ledger")
+              }
+
+              // MARK: - Top Context Ceiling & Memory Pressure Strip
+              @ViewBuilder
+              private func contextAndMemoryTopBanner(session: ConversationSession) -> some View {
+                  let usedTok = session.estimatedActiveTokens
+                  let maxTok = max(1, session.parameters.numCtx)
+                  let ratio = Double(usedTok) / Double(maxTok)
+                  let hasMemWarn = store.kernelMemoryPressureWarning != nil
+                  let showContextWarn = ratio >= 0.80 && !store.isContextCeilingBannerDismissed
+
+                  if hasMemWarn || showContextWarn {
+                      VStack(spacing: 0) {
+                          HStack(spacing: 12) {
+                              Rectangle()
+                                  .fill(tokens.primaryText)
+                                  .frame(width: 5, height: 5)
+
+                              if let memText = store.kernelMemoryPressureWarning {
+                                  Text(memText)
+                                      .font(typo.sans(size: 11.5, weight: .medium))
+                                      .foregroundColor(tokens.primaryText)
+                              } else {
+                                  Text("CONTEXT ALLOCATION AT \(Int(min(100, ratio * 100)))% (\(usedTok) / \(maxTok) TOK)")
+                                      .font(typo.mono(size: 10.5, weight: .medium))
+                                      .foregroundColor(tokens.primaryText)
+                              }
+
+                              Spacer()
+
+                              ArchitecturalKeyButton("TRIM OLDEST", tokens: tokens, typo: typo) {
+                                  store.trimOldestTurnInActiveSession()
+                              }
+
+                              ArchitecturalKeyButton("SUMMARIZE BRANCH", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                                  store.summarizeContextIntoNewBranch()
+                              }
+
+                              Button {
+                                  store.kernelMemoryPressureWarning = nil
+                                  store.isContextCeilingBannerDismissed = true
+                              } label: {
+                                  Text("×")
+                                      .font(typo.mono(size: 12, weight: .semibold))
+                                      .foregroundColor(tokens.mutedText)
+                                      .frame(width: 20, height: 20)
+                              }
+                              .buttonStyle(.plain)
+                          }
+                          .padding(.horizontal, 18)
+                          .padding(.vertical, 6)
+                          .background(tokens.elevatedSurface)
+
+                          HairlineDivider(tokens: tokens)
+                      }
+                  }
+              }
+
+              private func errorNoticeBanner(text: String) -> some View {
+                  VStack(spacing: 0) {
+                      HStack(spacing: 12) {
+                          Text(text)
+                              .font(typo.sans(size: 11.5))
+                              .foregroundColor(tokens.primaryText)
+                          Spacer()
+                          if !store.supervisor.isEngineOnline {
+                              ArchitecturalKeyButton("START DAEMON", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                                  Task { await store.bootstrapLocalOllamaConnection() }
+                              }
+                          }
+                          Button("DISMISS") {
+                              store.humanReadableErrorBanner = nil
+                          }
+                          .font(typo.mono(size: 10, weight: .semibold))
+                          .foregroundColor(tokens.secondaryText)
+                          .buttonStyle(.plain)
+                      }
+                      .padding(.horizontal, 20)
+                      .padding(.vertical, 7)
+                      .background(tokens.elevatedSurface)
+
+                      HairlineDivider(tokens: tokens)
+                  }
+              }
+
+              // MARK: - Strict .noSession Landing Gate
+              private var strictNoSessionLandingGate: some View {
+                  VStack(spacing: 14) {
+                      Spacer()
+
+                      Text("BlackMotif")
+                          .font(typo.display(size: 28, weight: .medium, italic: true))
+                          .foregroundColor(tokens.primaryText)
+
+                      Text("Quiet monochrome workstation for local models.")
+                          .font(typo.sans(size: 13))
+                          .foregroundColor(tokens.secondaryText)
+
+                      ArchitecturalKeyButton("CREATE NEW FOLIO", systemImage: "plus", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                          store.createNewSession(folderID: nil)
+                      }
+                      .padding(.top, 4)
+
+                      Spacer()
+                  }
+                  .frame(maxWidth: .infinity, maxHeight: .infinity)
+              }
+
+              // MARK: - Calm Manuscript Title Sheet on Empty New Folio (Zero Center Clutter — Controls Live in Right Studio Ledger!)
+              private func calmManuscriptTitleSheet(session: ConversationSession, maxWidth: CGFloat) -> some View {
+                  let model = store.activeModelDescriptor
+                  let params = session.parameters
+
+                  return VStack(spacing: 14) {
+                      Spacer()
+
+                      VStack(spacing: 8) {
+                          Text("FOLIO // 00")
+                              .font(typo.mono(size: 10, weight: .semibold))
+                              .tracking(1.2)
+                              .foregroundColor(tokens.mutedText)
+
+                          Text(session.title)
+                              .font(typo.display(size: 26, weight: .regular, italic: true))
+                              .foregroundColor(tokens.primaryText)
+                              .multilineTextAlignment(.center)
+
+                          if let m = model {
+                              Text("\(m.shortDisplayName)  ·  \(params.numCtx / 1024)k Context  ·  Thinking \(params.thinkingMode.rawValue)  ·  \(m.residency.rawValue)")
+                                  .font(typo.mono(size: 10.5))
+                                  .foregroundColor(tokens.secondaryText)
+                          } else {
+                              Text("Open Settings to pull a local model or start Ollama.")
+                                  .font(typo.mono(size: 10.5))
+                                  .foregroundColor(tokens.secondaryText)
+                          }
+
+                          HairlineDivider(tokens: tokens)
+                              .frame(width: min(maxWidth * 0.55, 320))
+                              .padding(.top, 6)
+
+                          if !store.isStudioLedgerVisible {
+                              Button {
+                                  store.openStudioLedger(tab: .studio)
+                              } label: {
+                                  Text("OPEN STUDIO LEDGER →")
+                                      .font(typo.mono(size: 9.5, weight: .semibold))
+                                      .tracking(0.8)
+                                      .foregroundColor(tokens.secondaryText)
+                                      .padding(.top, 4)
+                              }
+                              .buttonStyle(.plain)
+                          }
+                      }
+
+                      Spacer()
+                      Spacer()
+                  }
+                  .padding(.horizontal, 28)
+                  .padding(.bottom, max(86, composerMeasuredHeight))
+                  .frame(maxWidth: .infinity, maxHeight: .infinity)
+              }
+
+              // MARK: - Numbered Editorial Folio Stream
+              private func conversationStreamCanvas(
+                  session: ConversationSession,
+                  useLeftGutter: Bool,
+                  totalRowMaxWidth: CGFloat,
+                  horizontalPadding: CGFloat,
+                  opticalFontSize: CGFloat,
+                  isFullscreenOrWide: Bool
+              ) -> some View {
+                  let thread = session.activeBranchThread
+                  let lastTurnID = thread.last?.id
+                  let dynamicBottomClearance = max(124.0, composerMeasuredHeight + 28.0)
+                  let jumpButtonBottomOffset = max(92.0, composerMeasuredHeight + 12.0)
+
+                  return ScrollViewReader { proxy in
+                      ScrollView(.vertical, showsIndicators: true) {
+                          LazyVStack(alignment: .leading, spacing: 26) {
+                              ForEach(Array(thread.enumerated()), id: \.element.id) { turnIdx, node in
+                                  messageTurnView(
+                                      node: node,
+                                      turnNumber: turnIdx + 1,
+                                      session: session,
+                                      isLatestTurn: node.id == lastTurnID,
+                                      useLeftGutter: useLeftGutter,
+                                      opticalFontSize: opticalFontSize,
+                                      isFullscreenOrWide: isFullscreenOrWide
+                                  )
+                                  .id(node.id)
+                              }
+
+                              Color.clear
+                                  .frame(height: dynamicBottomClearance)
+                                  .id("STREAM_BOTTOM_ANCHOR")
+                          }
+                          .background(
+                              ScrollViewBottomObserver(
+                                  isScrolledAwayFromBottom: $store.isScrolledAwayFromBottom,
+                                  isDark: tokens.isEffectivelyDark
+                              )
+                              .frame(width: 1, height: 1)
+                          )
+                          .frame(maxWidth: totalRowMaxWidth, alignment: .leading)
+                          .padding(.horizontal, horizontalPadding)
+                          .padding(.top, 24)
+                          .frame(maxWidth: .infinity)
+                      }
+                      .onChange(of: store.streamScrollPulse) { _, _ in
+                          if store.isStreamingGeneration && !store.isScrolledAwayFromBottom && !store.isAutoScrollPaused {
+                              proxy.scrollTo("STREAM_BOTTOM_ANCHOR", anchor: .bottom)
+                          }
+                      }
+                      .onChange(of: store.pendingScrollToMessageID) { _, targetID in
+                          if let id = targetID {
+                              withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                                  proxy.scrollTo(id, anchor: .center)
+                              }
+                              store.pendingScrollToMessageID = nil
+                          }
+                      }
+                      .overlay(alignment: .bottom) {
+                          if store.isScrolledAwayFromBottom && !store.isComposerCanvasExpanded && store.matchedSlashPersonas.isEmpty {
+                              ArchitecturalJumpToLatestButton(tokens: tokens, typo: typo) {
+                                  store.isScrolledAwayFromBottom = false
+                                  store.isAutoScrollPaused = false
+                                  if store.isStreamingGeneration {
+                                      proxy.scrollTo("STREAM_BOTTOM_ANCHOR", anchor: .bottom)
+                                  } else {
+                                      withAnimation(.easeOut(duration: 0.18)) {
+                                          proxy.scrollTo("STREAM_BOTTOM_ANCHOR", anchor: .bottom)
+                                      }
+                                  }
+                              }
+                              .padding(.bottom, jumpButtonBottomOffset)
+                              .transition(.opacity)
+                          }
+                      }
+                  }
+              }
+
+              @ViewBuilder
+              private func messageTurnView(
+                  node: ConversationMessageNode,
+                  turnNumber: Int,
+                  session: ConversationSession,
+                  isLatestTurn: Bool,
+                  useLeftGutter: Bool,
+                  opticalFontSize: CGFloat,
+                  isFullscreenOrWide: Bool
+              ) -> some View {
+                  let siblingMeta = session.siblingInfo(for: node.id)
+                  let isNodeStreaming = store.isStreamingGeneration && store.streamingNodeID == node.id
+                  let isHovered = hoveredTurnNodeID == node.id
+
+                  VStack(alignment: .leading, spacing: 12) {
+                      if useLeftGutter {
+                          HStack(alignment: .top, spacing: 18) {
+                              // Numbered Margin Column (`01 // You` + Living Vertical Margin Rail)
+                              VStack(alignment: .leading, spacing: 6) {
+                                  Text(String(format: "%02d", turnNumber))
+                                      .font(typo.mono(size: 10, weight: .semibold))
+                                      .foregroundColor(tokens.mutedText)
+
+                                  turnRoleOrHotSwapMenu(node: node, maxLabelWidth: 112)
+
+                                  if siblingMeta.totalCount > 1 {
+                                      branchPaginationControl(nodeID: node.id, siblingMeta: siblingMeta)
+                                  }
+
+                                  if isNodeStreaming {
+                                      Button("STOP ■") {
+                                          store.stopActiveGeneration()
+                                      }
+                                      .font(typo.mono(size: 9.5, weight: .bold))
+                                      .tracking(0.5)
+                                      .foregroundColor(tokens.primaryText)
+                                      .padding(.horizontal, 7)
+                                      .padding(.vertical, 3)
+                                      .background(
+                                          RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                              .fill(tokens.elevatedSurface)
+                                      )
+                                      .overlay(
+                                          RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                              .strokeBorder(tokens.strongBorder, lineWidth: 0.75)
+                                      )
+                                      .buttonStyle(.plain)
+                                  }
+                              }
+                              .frame(width: 118, alignment: .leading)
+                              .clipped()
+
+                              // Vertical 1px Margin Rule
+                              Rectangle()
+                                  .fill(isNodeStreaming ? tokens.primaryText : tokens.hairline)
+                                  .frame(width: isNodeStreaming ? 1.5 : 1.0)
+
+                              VStack(alignment: .leading, spacing: 10) {
+                                  turnMainBody(
+                                      node: node,
+                                      isNodeStreaming: isNodeStreaming,
+                                      opticalFontSize: opticalFontSize,
+                                      isFullscreenOrWide: isFullscreenOrWide
+                                  )
+                                  turnBottomActionBar(
+                                      node: node,
+                                      session: session,
+                                      isLatestTurn: isLatestTurn,
+                                      isNodeStreaming: isNodeStreaming,
+                                      isTurnHovered: isHovered
+                                  )
+                              }
+                              .frame(maxWidth: .infinity, alignment: .leading)
+                          }
+                      } else {
+                          HStack(alignment: .center, spacing: 8) {
+                              Text(String(format: "%02d //", turnNumber))
+                                  .font(typo.mono(size: 10, weight: .semibold))
+                                  .foregroundColor(tokens.mutedText)
+
+                              turnRoleOrHotSwapMenu(node: node, maxLabelWidth: 200)
+
+                              if siblingMeta.totalCount > 1 {
+                                  branchPaginationControl(nodeID: node.id, siblingMeta: siblingMeta)
+                              }
+
+                              Spacer()
+
+                              if isNodeStreaming {
+                                  Button("STOP ■") {
+                                      store.stopActiveGeneration()
+                                  }
+                                  .font(typo.mono(size: 9.5, weight: .bold))
+                                  .foregroundColor(tokens.primaryText)
+                                  .buttonStyle(.plain)
+                              }
+                          }
+
+                          turnMainBody(
+                              node: node,
+                              isNodeStreaming: isNodeStreaming,
+                              opticalFontSize: opticalFontSize,
+                              isFullscreenOrWide: isFullscreenOrWide
+                          )
+                          turnBottomActionBar(
+                              node: node,
+                              session: session,
+                              isLatestTurn: isLatestTurn,
+                              isNodeStreaming: isNodeStreaming,
+                              isTurnHovered: isHovered
+                          )
+                      }
+
+                      HairlineDivider(tokens: tokens)
+                          .padding(.top, 6)
+                  }
+                  .contentShape(Rectangle())
+                  .onHover { hovering in
+                      hoveredTurnNodeID = hovering ? node.id : (hoveredTurnNodeID == node.id ? nil : hoveredTurnNodeID)
+                  }
+                  .contextMenu {
+                      Button("Copy Text") {
+                          NSPasteboard.general.clearContents()
+                          NSPasteboard.general.setString(node.content.isEmpty ? node.thinkingTrace : node.content, forType: .string)
+                      }
+                      Button(node.role == .user ? "Edit Prompt…" : "Edit / Trim Reply…") {
+                          editMessageDraft = node.content
+                          clearThinkingOnAssistantEdit = false
+                          isEditBoxExpandedFull = false
+                          editingMessageNodeID = node.id
+                      }
+                      Button("Fork to New Folio from Here") {
+                          store.branchMessageToNewChat(upToNodeID: node.id)
+                      }
+                      Divider()
+                      Button("Delete Entry (Free ~\(node.estimatedTokenFootprint) tok)…", role: .destructive) {
+                          confirmingDeleteNodeID = node.id
+                      }
+                  }
+              }
+
+              @ViewBuilder
+              private func turnRoleOrHotSwapMenu(node: ConversationMessageNode, maxLabelWidth: CGFloat) -> some View {
+                  if node.role == .user {
+                      Text("You")
+                          .font(typo.display(size: 13, weight: .semibold, italic: true))
+                          .foregroundColor(tokens.primaryText)
+                  } else {
+                      let rawModel = node.modelUsed.isEmpty ? "Assistant" : node.modelUsed
+                      let shortLabel = LocalModelDescriptor.shortenModelName(rawModel)
+
+                      Menu {
+                          Text("Regenerate entry with model:")
+                          ForEach(store.availableModels) { model in
+                              Button(model.shortDisplayName) {
+                                  store.regenerateAssistantBranch(forAssistantNodeID: node.id, withOverrideModel: model.name)
+                              }
+                          }
+                      } label: {
+                          HStack(spacing: 4) {
+                              Text(shortLabel)
+                                  .font(typo.display(size: 13, weight: .semibold))
+                                  .foregroundColor(tokens.primaryText)
+                                  .lineLimit(1)
+                                  .truncationMode(.tail)
+                              Text("▾")
+                                  .font(typo.mono(size: 9))
+                                  .foregroundColor(tokens.mutedText)
+                          }
+                          .frame(maxWidth: maxLabelWidth, alignment: .leading)
+                      }
+                      .menuStyle(.borderlessButton)
+                      .frame(maxWidth: maxLabelWidth, alignment: .leading)
+                      .help("\(shortLabel) — Hot-swap model and regenerate this entry")
+                  }
+              }
+
+              private func branchPaginationControl(nodeID: UUID, siblingMeta: (currentIndex: Int, totalCount: Int)) -> some View {
+                  HStack(spacing: 1) {
+                      Button {
+                          store.switchBranchVersion(forNodeID: nodeID, delta: -1)
+                      } label: {
+                          Text("‹")
+                              .font(typo.mono(size: 11, weight: .bold))
+                              .frame(width: 18, height: 18)
+                              .contentShape(Rectangle())
+                      }
+                      .buttonStyle(.plain)
+                      .disabled(siblingMeta.currentIndex == 0)
+                      .opacity(siblingMeta.currentIndex == 0 ? 0.35 : 1.0)
+
+                      Text("\(siblingMeta.currentIndex + 1)/\(siblingMeta.totalCount)")
+                          .font(typo.mono(size: 9.5, weight: .medium))
+
+                      Button {
+                          store.switchBranchVersion(forNodeID: nodeID, delta: 1)
+                      } label: {
+                          Text("›")
+                              .font(typo.mono(size: 11, weight: .bold))
+                              .frame(width: 18, height: 18)
+                              .contentShape(Rectangle())
+                      }
+                      .buttonStyle(.plain)
+                      .disabled(siblingMeta.currentIndex >= siblingMeta.totalCount - 1)
+                      .opacity(siblingMeta.currentIndex >= siblingMeta.totalCount - 1 ? 0.35 : 1.0)
+                  }
+                  .foregroundColor(tokens.secondaryText)
+                  .padding(.horizontal, 2)
+                  .frame(height: 20)
+                  .background(
+                      RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                          .fill(tokens.elevatedSurface)
+                  )
+                  .overlay(
+                      RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                          .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                  )
+              }
+
+              @ViewBuilder
+              private func turnMainBody(
+                  node: ConversationMessageNode,
+                  isNodeStreaming: Bool,
+                  opticalFontSize: CGFloat,
+                  isFullscreenOrWide: Bool
+              ) -> some View {
+                  if !node.attachments.isEmpty {
+                      HStack(spacing: 8) {
+                          ForEach(node.attachments) { att in
+                              Text("DOC // \(att.title) · \(att.formattedByteSize) · ~\(att.tokenEstimate) TOK")
+                                  .font(typo.mono(size: 10, weight: .medium))
+                                  .foregroundColor(tokens.primaryText)
+                                  .padding(.horizontal, 8)
+                                  .padding(.vertical, 4)
+                                  .background(tokens.elevatedSurface)
+                                  .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                                  .overlay(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                  )
+                          }
+                      }
+                  }
+
+                  if !node.thinkingTrace.isEmpty || (!node.isThinkingComplete && isNodeStreaming) {
+                      thinkingDisclosureView(for: node, isStreaming: isNodeStreaming, opticalFontSize: opticalFontSize)
+                  }
+
+                  if editingMessageNodeID == node.id {
+                      let approxLines = max(6, editMessageDraft.components(separatedBy: .newlines).reduce(0) { $0 + max(1, ($1.count / 72) + 1) })
+                      let naturalEditorHeight = CGFloat(approxLines) * (opticalFontSize * 1.55) + 36.0
+                      let maxStandardHeight: CGFloat = isFullscreenOrWide ? 660.0 : 480.0
+                      let editorHeight: CGFloat = isEditBoxExpandedFull
+                          ? min(940.0, max(maxStandardHeight, naturalEditorHeight))
+                          : min(maxStandardHeight, max(180.0, naturalEditorHeight))
+
+                      VStack(alignment: .leading, spacing: 8) {
+                          HStack {
+                              Text(node.role == .user ? "EDITING PROMPT" : "EDITING REPLY (TRIM TEXT TO FREE KV CACHE)")
+                                  .font(typo.mono(size: 10, weight: .semibold))
+                                  .tracking(0.6)
+                                  .foregroundColor(tokens.secondaryText)
+
+                              Spacer()
+
+                              ArchitecturalKeyButton(isEditBoxExpandedFull ? "STANDARD HEIGHT" : "FULL HEIGHT", tokens: tokens, typo: typo) {
+                                  withAnimation(.easeOut(duration: 0.14)) {
+                                      isEditBoxExpandedFull.toggle()
+                                  }
+                              }
+                          }
+
+                          MotifStyledTextEditor(
+                              text: $editMessageDraft,
+                              font: typo.nsFont(size: opticalFontSize),
+                              tokens: tokens
+                          )
+                          .frame(height: editorHeight)
+                          .padding(8)
+                          .background(tokens.elevatedSurface)
+                          .clipShape(RoundedRectangle(cornerRadius: 3.5, style: .continuous))
+                          .overlay(
+                              RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                                  .strokeBorder(tokens.strongBorder, lineWidth: 0.75)
+                          )
+
+                          HStack(spacing: 12) {
+                              if node.role == .assistant {
+                                  if !node.thinkingTrace.isEmpty {
+                                      Toggle("Hide stored thought process box", isOn: $clearThinkingOnAssistantEdit)
+                                          .font(typo.sans(size: 11.5))
+                                          .foregroundColor(tokens.secondaryText)
+                                  }
+                                  let oldTok = max(1, node.content.count / 4)
+                                  let newTok = max(1, editMessageDraft.count / 4)
+                                  let savedTok = max(0, oldTok - newTok)
+                                  if savedTok > 0 {
+                                      Text("SAVES ~\(savedTok) KV TOK")
+                                          .font(typo.mono(size: 10, weight: .semibold))
+                                          .foregroundColor(tokens.primaryText)
+                                  }
+                              }
+
+                              Spacer()
+
+                              ArchitecturalKeyButton("CANCEL", tokens: tokens, typo: typo) {
+                                  editingMessageNodeID = nil
+                              }
+
+                              if node.role == .user {
+                                  ArchitecturalKeyButton("SAVE & RESUBMIT", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                                      let updated = editMessageDraft
+                                      editingMessageNodeID = nil
+                                      store.createEditedMessageBranch(originalNodeID: node.id, updatedText: updated)
+                                  }
+                              } else {
+                                  ArchitecturalKeyButton("SAVE TRIMMED REPLY", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                                      let updated = editMessageDraft
+                                      let clearThink = clearThinkingOnAssistantEdit
+                                      editingMessageNodeID = nil
+                                      store.updateAssistantMessageInPlace(nodeID: node.id, updatedText: updated, clearThinking: clearThink)
+                                  }
+                              }
+                          }
+                      }
+                  } else if node.content.isEmpty && isNodeStreaming {
+                      if store.isLoadingModelWeights {
+                          let snap = store.memorySnapshot
+                          let pct = Int(snap.loadProgressAgainstTarget * 100.0)
+                          let targetGB = max(0.1, snap.targetModelGB)
+                          let allocatedGB = min(targetGB, max(snap.weightsGB, snap.activeRAMDeltaGB))
+                          Text(String(format: "Mapping weights into Unified Memory (%.1f / %.1f GB · %d%%)…", allocatedGB, targetGB, pct))
+                              .font(typo.mono(size: 11))
+                              .foregroundColor(tokens.mutedText)
+                      } else if node.thinkingTrace.isEmpty {
+                          Text("Composing…")
+                              .font(typo.display(size: opticalFontSize, italic: true))
+                              .foregroundColor(tokens.mutedText)
+                      }
+                  } else if !node.content.isEmpty {
+                      StreamSafeMarkdownView(
+                          rawMarkdown: isNodeStreaming ? (node.content + " ▍") : node.content,
+                          isStreaming: isNodeStreaming,
+                          effectiveFontSize: opticalFontSize,
+                          tokens: tokens,
+                          typo: typo,
+                          onOpenCodeInInspector: { _, _ in
+                              store.openStudioLedger(tab: .code)
+                          }
+                      )
+                  }
+
+                  if let err = node.errorNote {
+                      Text(err)
+                          .font(typo.sans(size: 12))
+                          .foregroundColor(tokens.primaryText)
+                          .padding(8)
+                          .background(tokens.elevatedSurface)
+                          .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(tokens.strongBorder, lineWidth: 0.75))
+                  }
+              }
+
+              // MARK: - Quiet Hover-Reveal Footnotes & Split Thinking/Answer Telemetry
+              @ViewBuilder
+              private func turnBottomActionBar(
+                  node: ConversationMessageNode,
+                  session: ConversationSession,
+                  isLatestTurn: Bool,
+                  isNodeStreaming: Bool,
+                  isTurnHovered: Bool
+              ) -> some View {
+                  let showFootnoteControls = isTurnHovered || isLatestTurn || confirmingDeleteNodeID == node.id
+
+                  HStack(spacing: 12) {
+                      if isNodeStreaming {
+                          let isCurrentlyInThinkingPhase = !node.isThinkingComplete && node.content.isEmpty
+                          if store.liveTokensPerSec > 0 || store.liveTotalTokens > 0 || store.liveThinkingTokens > 0 {
+                              HStack(spacing: 6) {
+                                  Rectangle()
+                                      .fill(tokens.primaryText)
+                                      .frame(width: 4.5, height: 4.5)
+                                  if isCurrentlyInThinkingPhase {
+                                      Text(String(format: "%.1f TOK/S · %d THINKING TOK", store.liveTokensPerSec, max(1, store.liveThinkingTokens)))
+                                          .font(typo.mono(size: 10, weight: .medium))
+                                          .foregroundColor(tokens.secondaryText)
+                                  } else {
+                                      Text(String(format: "%.1f TOK/S · %d TOK", store.liveTokensPerSec, max(1, store.liveTotalTokens)))
+                                          .font(typo.mono(size: 10, weight: .medium))
+                                          .foregroundColor(tokens.secondaryText)
+                                  }
+                              }
+                          } else {
+                              Text("INITIALIZING STREAM…")
+                                  .font(typo.mono(size: 9.5))
+                                  .foregroundColor(tokens.mutedText)
+                          }
+
+                          Spacer()
+
+                          Text("FOLIO TOTAL: \(session.estimatedActiveTokens) TOK")
+                              .font(typo.mono(size: 10, weight: .medium))
+                              .foregroundColor(tokens.mutedText)
+                      } else {
+                          if confirmingDeleteNodeID == node.id {
+                              HStack(spacing: 8) {
+                                  Text("DELETE ENTRY & FREE ~\(node.estimatedTokenFootprint) TOK?")
+                                      .font(typo.mono(size: 9.5, weight: .semibold))
+                                      .foregroundColor(tokens.primaryText)
+
+                                  ArchitecturalKeyButton("CONFIRM", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                                      confirmingDeleteNodeID = nil
+                                      store.deleteSingleMessageNode(node.id)
+                                  }
+
+                                  Button("CANCEL") {
+                                      confirmingDeleteNodeID = nil
+                                  }
+                                  .font(typo.mono(size: 9.5))
+                                  .foregroundColor(tokens.secondaryText)
+                                  .buttonStyle(.plain)
+                              }
+                          } else if showFootnoteControls {
+                              HStack(spacing: 12) {
+                                  Button(copiedMessageID == node.id ? "COPIED" : "COPY") {
+                                      NSPasteboard.general.clearContents()
+                                      NSPasteboard.general.setString(node.content.isEmpty ? node.thinkingTrace : node.content, forType: .string)
+                                      copiedMessageID = node.id
+                                      DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                          if copiedMessageID == node.id { copiedMessageID = nil }
+                                      }
+                                  }
+                                  .font(typo.mono(size: 9.5, weight: .medium))
+                                  .tracking(0.5)
+                                  .foregroundColor(tokens.secondaryText)
+                                  .buttonStyle(.plain)
+
+                                  Button("EDIT") {
+                                      editMessageDraft = node.content
+                                      clearThinkingOnAssistantEdit = false
+                                      isEditBoxExpandedFull = false
+                                      editingMessageNodeID = node.id
+                                  }
+                                  .font(typo.mono(size: 9.5, weight: .medium))
+                                  .tracking(0.5)
+                                  .foregroundColor(tokens.secondaryText)
+                                  .buttonStyle(.plain)
+
+                                  if node.role == .user && node.childrenIDs.isEmpty {
+                                      Button("GENERATE REPLY") {
+                                          store.regenerateOrAnswerUserNode(nodeID: node.id)
+                                      }
+                                      .font(typo.mono(size: 9.5, weight: .bold))
+                                      .tracking(0.5)
+                                      .foregroundColor(tokens.primaryText)
+                                      .buttonStyle(.plain)
+                                  }
+
+                                  if node.role == .assistant {
+                                      Button("REDO") {
+                                          store.regenerateAssistantBranch(forAssistantNodeID: node.id)
+                                      }
+                                      .font(typo.mono(size: 9.5, weight: .medium))
+                                      .tracking(0.5)
+                                      .foregroundColor(tokens.secondaryText)
+                                      .buttonStyle(.plain)
+
+                                      if node.wasStoppedMidStream && isLatestTurn {
+                                          ArchitecturalKeyButton("CONTINUE ▶", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                                              store.continueStoppedGeneration(forAssistantNodeID: node.id)
+                                          }
+                                      }
+                                  }
+
+                                  Button("FORK") {
+                                      store.branchMessageToNewChat(upToNodeID: node.id)
+                                  }
+                                  .font(typo.mono(size: 9.5, weight: .medium))
+                                  .tracking(0.5)
+                                  .foregroundColor(tokens.secondaryText)
+                                  .buttonStyle(.plain)
+
+                                  Button("DELETE") {
+                                      confirmingDeleteNodeID = node.id
+                                  }
+                                  .font(typo.mono(size: 9.5, weight: .medium))
+                                  .tracking(0.5)
+                                  .foregroundColor(tokens.mutedText)
+                                  .buttonStyle(.plain)
+                              }
+                              .transition(.opacity)
+                          }
+
+                          Spacer()
+
+                          let answerOnlyTok = node.role == .assistant
+                              ? (node.content.isEmpty ? 0 : max(node.estimatedTokenFootprint, node.metrics?.totalTokens ?? 0))
+                              : node.estimatedTokenFootprint
+                          let tps = node.metrics?.tokensPerSecond ?? 0.0
+
+                          if node.role == .user {
+                              if isLatestTurn {
+                                  Text("~\(answerOnlyTok) TOK · FOLIO TOTAL: \(session.estimatedActiveTokens) TOK")
+                                      .font(typo.mono(size: 9.5))
+                                      .foregroundColor(tokens.mutedText)
+                              } else {
+                                  Text("~\(answerOnlyTok) TOK")
+                                      .font(typo.mono(size: 9.5))
+                                      .foregroundColor(tokens.mutedText)
+                              }
+                          } else if isLatestTurn {
+                              if tps > 0 {
+                                  Text(String(format: "%.1f TOK/S · %d TOK · FOLIO TOTAL: %d TOK", tps, answerOnlyTok, session.estimatedActiveTokens))
+                                      .font(typo.mono(size: 9.5))
+                                      .foregroundColor(tokens.mutedText)
+                              } else {
+                                  Text("~\(answerOnlyTok) TOK · FOLIO TOTAL: \(session.estimatedActiveTokens) TOK")
+                                      .font(typo.mono(size: 9.5))
+                                      .foregroundColor(tokens.mutedText)
+                              }
+                          } else {
+                              if tps > 0 {
+                                  Text(String(format: "%.1f TOK/S · %d TOK", tps, answerOnlyTok))
+                                      .font(typo.mono(size: 9.5))
+                                      .foregroundColor(tokens.mutedText)
+                              } else {
+                                  Text("~\(answerOnlyTok) TOK")
+                                      .font(typo.mono(size: 9.5))
+                                      .foregroundColor(tokens.mutedText)
+                              }
+                          }
+                      }
+                  }
+                  .frame(height: 22)
+                  .padding(.top, 2)
+              }
+
+              // MARK: - Drafting Vellum Thought Process Box (`§ Thought Process`)
+              @ViewBuilder
+              private func thinkingDisclosureView(
+                  for node: ConversationMessageNode,
+                  isStreaming: Bool,
+                  opticalFontSize: CGFloat
+              ) -> some View {
+                  let relativeThinkingFontSize = max(10.5, opticalFontSize - 2.3)
+                  let headerFontSize = max(10.0, opticalFontSize - 3.2)
+                  let wordCount = max(1, node.thinkingTrace.split { $0.isWhitespace || $0.isNewline }.count)
+                  let isActivelyThinking = !node.isThinkingComplete && isStreaming
+                  let thinkTokCount = isActivelyThinking
+                      ? max(store.liveThinkingTokens, node.thinkingTrace.count / 4)
+                      : max(node.metrics?.thinkingTokens ?? 0, node.thinkingTrace.count / 4)
+
+                  VStack(alignment: .leading, spacing: 5) {
+                      Button {
+                          guard let sIdx = store.sessions.firstIndex(where: { $0.id == store.selectedSessionID }),
+                                var target = store.sessions[sIdx].nodes[node.id] else { return }
+                          withAnimation(.easeOut(duration: 0.14)) {
+                              target.isThinkingExpanded.toggle()
+                              store.sessions[sIdx].nodes[node.id] = target
+                          }
+                      } label: {
+                          HStack(spacing: 8) {
+                              Text("§")
+                                  .font(typo.display(size: headerFontSize + 1.5, weight: .semibold, italic: true))
+                                  .foregroundColor(tokens.thinkingText)
+
+                              Text(node.wasStoppedMidThinking ? "THOUGHT PROCESS · STOPPED" : (isActivelyThinking ? "THINKING LIVE" : "THOUGHT PROCESS"))
+                                  .font(typo.mono(size: headerFontSize, weight: .semibold))
+                                  .tracking(0.6)
+                                  .foregroundColor(tokens.thinkingText)
+
+                              Text(node.isThinkingComplete
+                                   ? String(format: "%.1fs", node.metrics?.thinkingDurationSec ?? 0.0)
+                                   : String(format: "%.1fs…", store.liveElapsedSeconds))
+                                  .font(typo.mono(size: headerFontSize))
+                                  .foregroundColor(tokens.thinkingText.opacity(0.75))
+
+                              if !node.thinkingTrace.isEmpty {
+                                  Text("· \(wordCount)w (~\(max(1, thinkTokCount)) tok)")
+                                      .font(typo.mono(size: headerFontSize))
+                                      .foregroundColor(tokens.thinkingText.opacity(0.65))
+                              }
+
+                              Text(node.isThinkingExpanded ? "▾" : "▸")
+                                  .font(typo.mono(size: 10))
+                                  .foregroundColor(tokens.thinkingText.opacity(0.75))
+                          }
+                          .padding(.horizontal, 10)
+                          .padding(.vertical, 5)
+                          .background(tokens.thinkingSurface)
+                          .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                          .overlay(
+                              RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                  .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                          )
+                      }
+                      .buttonStyle(.plain)
+
+                      if node.isThinkingExpanded {
+                          StreamSafeMarkdownView(
+                              rawMarkdown: node.thinkingTrace.isEmpty ? "Deliberating…" : node.thinkingTrace,
+                              isStreaming: isActivelyThinking,
+                              effectiveFontSize: relativeThinkingFontSize,
+                              tokens: tokens,
+                              typo: typo,
+                              useMonospaceBody: true,
+                              overrideTextColor: tokens.thinkingText,
+                              onOpenCodeInInspector: { _, _ in
+                                  store.openStudioLedger(tab: .code)
+                              }
+                          )
+                          .padding(12)
+                          .frame(maxWidth: .infinity, alignment: .leading)
+                          .background(tokens.thinkingSurface)
+                          .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                          .overlay(
+                              RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                  .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                          )
+                      }
+                  }
+                  .padding(.bottom, 2)
+              }
+          }
+
+          // MARK: - Architectural Drafting Plinth (Rectilinear 3.5pt Composer with Integrated Attachment Manifest)
+          public struct ArchitecturalDraftingPlinth: View {
+              @ObservedObject public var store: WorkstationStore
+              public let tokens: MotifTokens
+              public var maxBarWidth: CGFloat = 760.0
+              public var activeFontSize: CGFloat = 14.0
+              public var isWideOrFullscreen: Bool = false
+
+              @State private var isComposerFocused: Bool = false
+              @State private var compactEditorHeight: CGFloat = 28.0
+              @State private var wrappedLineCount: Int = 1
+
+              private var typo: TypographyConfiguration { store.typography }
+
+              private var isSendEnabled: Bool {
+                  store.isStreamingGeneration || store.sendDisabledReason == nil
+              }
+
+              private var matchingPersonas: [SlashPersona] {
+                  store.matchedSlashPersonas
+              }
+
+              private var effectiveEditorHeight: CGFloat {
+                  store.isComposerCanvasExpanded ? 230.0 : compactEditorHeight
+              }
+
+              private var adaptivePlaceholder: String {
+                  isWideOrFullscreen
+                      ? "Compose entry…  (Type / for personas · Shift+Return for new line)"
+                      : "Compose entry…  (/ for personas)"
+              }
+
+              public var body: some View {
+                  VStack(alignment: .leading, spacing: 8) {
+                      if !matchingPersonas.isEmpty {
+                          SlashPersonaCommandPaletteCard(
+                              personas: matchingPersonas,
+                              highlightedIndex: min(max(0, store.slashMenuHighlightedIndex), max(0, matchingPersonas.count - 1)),
+                              tokens: tokens,
+                              typo: typo,
+                              onSelect: { persona in
+                                  store.applySlashPersona(persona)
+                              },
+                              onManagePersonas: {
+                                  store.isSlashMenuDismissedForCurrentToken = true
+                                  store.settingsRequestedSection = "03 // PERSONAS"
+                                  store.isSettingsViewActive = true
+                              },
+                              onDismiss: {
+                                  store.isSlashMenuDismissedForCurrentToken = true
+                              }
+                          )
+                          .frame(maxWidth: min(maxBarWidth, 500))
+                      }
+
+                      VStack(alignment: .leading, spacing: 0) {
+                          // Integrated Attachment Manifest Strip Inside the Top of the Plinth
+                          if !store.pendingAttachments.isEmpty {
+                              ScrollView(.horizontal, showsIndicators: false) {
+                                  HStack(spacing: 8) {
+                                      ForEach(store.pendingAttachments.indices, id: \.self) { idx in
+                                          let chip = store.pendingAttachments[idx]
+                                          HStack(spacing: 6) {
+                                              Text(chip.kind == .downscaledVisionImage ? "IMG //" : "DOC //")
+                                                  .font(typo.mono(size: 9.5, weight: .semibold))
+                                                  .foregroundColor(tokens.mutedText)
+                                              Text("\(chip.title) (\(chip.formattedByteSize) · ~\(chip.tokenEstimate) tok)")
+                                                  .font(typo.mono(size: 10))
+                                                  .foregroundColor(tokens.primaryText)
+                                              Button {
+                                                  store.pendingAttachments.remove(at: idx)
+                                              } label: {
+                                                  Text("×")
+                                                      .font(typo.mono(size: 11, weight: .bold))
+                                                      .foregroundColor(tokens.secondaryText)
+                                              }
+                                              .buttonStyle(.plain)
+                                          }
+                                          .padding(.horizontal, 8)
+                                          .padding(.vertical, 4)
+                                          .background(tokens.elevatedSurface)
+                                          .clipShape(RoundedRectangle(cornerRadius: 2.5, style: .continuous))
+                                          .overlay(
+                                              RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                                  .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                          )
+                                      }
+                                  }
+                                  .padding(.horizontal, 12)
+                                  .padding(.vertical, 7)
+                              }
+
+                              HairlineDivider(tokens: tokens)
+                          }
+
+                          // Deck A: Full-Width Drafting Field + Expand/Contract Canvas Key
+                          HStack(alignment: .top, spacing: 6) {
+                              IMESafeComposerTextView(
+                                  text: Binding(
+                                      get: { store.composerDraft },
+                                      set: { store.handleTextInputOrPaste($0) }
+                                  ),
+                                  isFocused: $isComposerFocused,
+                                  compactHeight: $compactEditorHeight,
+                                  lineCount: $wrappedLineCount,
+                                  placeholder: adaptivePlaceholder,
+                                  tokens: tokens,
+                                  typo: typo,
+                                  fontSize: activeFontSize,
+                                  isSlashMenuVisible: !matchingPersonas.isEmpty,
+                                  onSend: {
+                                      if !store.isStreamingGeneration && store.sendDisabledReason == nil {
+                                          store.sendActivePrompt()
+                                      }
+                                  },
+                                  onSlashMoveUp: { store.moveSlashSelection(delta: -1) },
+                                  onSlashMoveDown: { store.moveSlashSelection(delta: 1) },
+                                  onSlashConfirm: { store.applyHighlightedSlashPersona() },
+                                  onSlashDismiss: { store.isSlashMenuDismissedForCurrentToken = true },
+                                  onLargePaste: { pasted in store.handleTextInputOrPaste(pasted) }
+                              )
+                              .frame(height: effectiveEditorHeight)
+
+                              Button {
+                                  withAnimation(.easeOut(duration: 0.14)) {
+                                      store.isComposerCanvasExpanded.toggle()
+                                  }
+                              } label: {
+                                  Image(systemName: store.isComposerCanvasExpanded
+                                        ? "arrow.down.right.and.arrow.up.left"
+                                        : "arrow.up.left.and.arrow.down.right")
+                                      .font(.system(size: 10, weight: .semibold))
+                                      .foregroundColor(store.isComposerCanvasExpanded ? tokens.primaryText : tokens.mutedText)
+                                      .frame(width: 22, height: 22)
+                                      .background(
+                                          RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                              .fill(tokens.elevatedSurface.opacity(0.75))
+                                      )
+                                      .overlay(
+                                          RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                              .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                      )
+                              }
+                              .buttonStyle(.plain)
+                              .padding(.top, 2)
+                              .help(store.isComposerCanvasExpanded ? "Restore compact height" : "Expand drafting sheet")
+                          }
+                          .padding(.horizontal, 12)
+                          .padding(.top, 8)
+                          .padding(.bottom, 5)
+
+                          HairlineDivider(tokens: tokens)
+
+                          // Deck B: Flush Architectural Key Bar
+                          HStack(alignment: .center, spacing: 8) {
+                              ArchitecturalKeyButton("+ FILE", tokens: tokens, typo: typo) {
+                                  attachLocalFileOrVisionAsset()
+                              }
+
+                              if let activeTrigger = store.activeSession?.activePersonaTrigger {
+                                  HStack(spacing: 5) {
+                                      Text(activeTrigger.uppercased())
+                                          .font(typo.mono(size: 9.5, weight: .semibold))
+                                          .foregroundColor(tokens.primaryText)
+                                      Button("×") {
+                                          if let idx = store.sessions.firstIndex(where: { $0.id == store.selectedSessionID }) {
+                                              store.sessions[idx].activePersonaTrigger = nil
+                                              store.saveAllState()
+                                          }
+                                      }
+                                      .font(typo.mono(size: 10, weight: .bold))
+                                      .foregroundColor(tokens.mutedText)
+                                      .buttonStyle(.plain)
+                                  }
+                                  .padding(.horizontal, 8)
+                                  .frame(height: 25)
+                                  .background(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .fill(tokens.selectionPill)
+                                  )
+                                  .overlay(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                  )
+                              }
+
+                              if !store.composerDraft.isEmpty {
+                                  Text("\(wrappedLineCount)L · ~\(max(1, store.composerDraft.count / 4)) TOK")
+                                      .font(typo.mono(size: 9.5))
+                                      .foregroundColor(tokens.mutedText)
+                              }
+
+                              Spacer()
+
+                              if !store.isStudioLedgerVisible {
+                                  ArchitecturalKeyButton("STUDIO", tokens: tokens, typo: typo) {
+                                      store.openStudioLedger(tab: .studio)
+                                  }
+                              }
+
+                              ArchitecturalKeyButton(
+                                  store.isStreamingGeneration ? "STOP ■" : "SEND ↵",
+                                  isPrimaryStamp: true,
+                                  isDisabled: !isSendEnabled,
+                                  tokens: tokens,
+                                  typo: typo
+                              ) {
+                                  if store.isStreamingGeneration {
+                                      store.stopActiveGeneration()
+                                  } else {
+                                      store.sendActivePrompt()
+                                  }
+                              }
+                          }
+                          .padding(.horizontal, 10)
+                          .padding(.vertical, 6)
+                          .background(tokens.elevatedSurface.opacity(0.45))
+                      }
+                      .background(tokens.canvasBackground)
+                      .clipShape(RoundedRectangle(cornerRadius: 3.5, style: .continuous))
+                      .overlay(
+                          RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                              .strokeBorder(isComposerFocused ? tokens.strongBorder : tokens.hairline, lineWidth: 0.75)
+                      )
+                      .shadow(
+                          color: Color.black.opacity(tokens.isEffectivelyDark ? 0.28 : 0.045),
+                          radius: 12,
+                          y: 4
+                      )
+                  }
+                  .frame(maxWidth: maxBarWidth)
+              }
+
+              private func attachLocalFileOrVisionAsset() {
+                  let panel = NSOpenPanel()
+                  panel.title = "Attach Document or Image"
+                  panel.allowsMultipleSelection = true
+                  panel.canChooseDirectories = false
+                  if panel.runModal() == .OK {
+                      store.attachFilesFromURLs(panel.urls)
+                  }
+              }
+          }
+
+          // MARK: - Rectilinear Slash Command Palette
+          public struct SlashPersonaCommandPaletteCard: View {
+              public let personas: [SlashPersona]
+              public let highlightedIndex: Int
+              public let tokens: MotifTokens
+              public let typo: TypographyConfiguration
+              public let onSelect: (SlashPersona) -> Void
+              public let onManagePersonas: () -> Void
+              public let onDismiss: () -> Void
+
+              public var body: some View {
+                  VStack(alignment: .leading, spacing: 0) {
+                      HStack(spacing: 8) {
+                          Text("SLASH PERSONAS")
+                              .font(typo.mono(size: 9.5, weight: .semibold))
+                              .tracking(0.8)
+                              .foregroundColor(tokens.mutedText)
+
+                          Spacer()
+
+                          Text("↑↓ · ↵ APPLY · ESC")
+                              .font(typo.mono(size: 9))
+                              .foregroundColor(tokens.mutedText)
+
+                          Button("×", action: onDismiss)
+                              .font(typo.mono(size: 11, weight: .semibold))
+                              .foregroundColor(tokens.mutedText)
+                              .buttonStyle(.plain)
+                      }
+                      .padding(.horizontal, 12)
+                      .frame(height: 28)
+                      .background(tokens.elevatedSurface)
+
+                      HairlineDivider(tokens: tokens)
+
+                      ScrollView(.vertical, showsIndicators: true) {
+                          VStack(alignment: .leading, spacing: 2) {
+                              ForEach(Array(personas.enumerated()), id: \.element.id) { idx, persona in
+                                  let isHighlighted = idx == highlightedIndex
+                                  Button {
+                                      onSelect(persona)
+                                  } label: {
+                                      HStack(alignment: .center, spacing: 10) {
+                                          Text(persona.trigger)
+                                              .font(typo.mono(size: 10.5, weight: .semibold))
+                                              .foregroundColor(isHighlighted ? tokens.accentForeground : tokens.primaryText)
+                                              .padding(.horizontal, 6)
+                                              .padding(.vertical, 2.5)
+                                              .background(
+                                                  RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                                      .fill(isHighlighted ? tokens.accentAction : tokens.elevatedSurface)
+                                              )
+                                              .frame(width: 88, alignment: .leading)
+
+                                          VStack(alignment: .leading, spacing: 1) {
+                                              Text(persona.title)
+                                                  .font(typo.sans(size: 12, weight: .semibold))
+                                                  .foregroundColor(tokens.primaryText)
+                                                  .lineLimit(1)
+
+                                              Text(persona.systemPrompt)
+                                                  .font(typo.sans(size: 10.5))
+                                                  .foregroundColor(tokens.secondaryText)
+                                                  .lineLimit(1)
+                                          }
+
+                                          Spacer(minLength: 4)
+                                      }
+                                      .padding(.horizontal, 8)
+                                      .padding(.vertical, 5)
+                                      .background(
+                                          RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                              .fill(isHighlighted ? tokens.selectionPill : Color.clear)
+                                      )
+                                      .contentShape(Rectangle())
+                                  }
+                                  .buttonStyle(.plain)
+                              }
+                          }
+                          .padding(6)
+                      }
+                      .frame(maxHeight: 200)
+
+                      HairlineDivider(tokens: tokens)
+
+                      HStack {
+                          Button("+ Configure Personas in Settings…", action: onManagePersonas)
+                              .font(typo.mono(size: 9.5, weight: .medium))
+                              .foregroundColor(tokens.secondaryText)
+                              .buttonStyle(.plain)
+                          Spacer()
+                      }
+                      .padding(.horizontal, 12)
+                      .frame(height: 26)
+                      .background(tokens.elevatedSurface.opacity(0.45))
+                  }
+                  .background(tokens.canvasBackground)
+                  .clipShape(RoundedRectangle(cornerRadius: 3.5, style: .continuous))
+                  .overlay(
+                      RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                          .strokeBorder(tokens.strongBorder, lineWidth: 0.75)
+                  )
+                  .shadow(color: Color.black.opacity(0.10), radius: 8, y: 3)
+              }
+          }
+          EOF
+
+      - name: Generate Plane 3 Unified Studio, Memory & Code Ledger (RightStudioLedgerView.swift)
+        run: |
+          cat << 'EOF' > BlackMotif/Sources/BlackMotif/Views/RightStudioLedgerView.swift
+          import SwiftUI
+          import AppKit
+
+          public struct RightStudioLedgerView: View {
+              @ObservedObject public var store: WorkstationStore
+              public let tokens: MotifTokens
+
+              @State private var isAdvancedCLIExpanded: Bool = false
+
+              private var typo: TypographyConfiguration { store.typography }
+
+              private var activeSessionBinding: Binding<ConversationSession>? {
+                  guard let id = store.selectedSessionID,
+                        let idx = store.sessions.firstIndex(where: { $0.id == id }) else { return nil }
+                  return $store.sessions[idx]
+              }
+
+              private let presetGridColumns = [
+                  GridItem(.adaptive(minimum: 84, maximum: 140), spacing: 5)
+              ]
+
+              public var body: some View {
+                  VStack(alignment: .leading, spacing: 0) {
+                      if !store.isWindowFullscreen {
+                          Color.clear.frame(height: 26)
+                      }
+
+                      // Top 40pt Flush 3-Cell Tab Bar (`STUDIO | MEMORY | CODE`)
+                      HStack(spacing: 0) {
+                          ForEach(Array(RightLedgerTab.allCases.enumerated()), id: \.element.id) { idx, tab in
+                              let isSelected = store.activeRightLedgerTab == tab
+                              Button {
+                                  store.activeRightLedgerTab = tab
+                              } label: {
+                                  VStack(spacing: 0) {
+                                      Spacer()
+                                      Text(tab.rawValue)
+                                          .font(typo.mono(size: 10, weight: isSelected ? .bold : .medium))
+                                          .tracking(0.8)
+                                          .foregroundColor(isSelected ? tokens.primaryText : tokens.mutedText)
+                                      Spacer()
+                                      Rectangle()
+                                          .fill(isSelected ? tokens.accentAction : Color.clear)
+                                          .frame(height: 2)
+                                  }
+                                  .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                  .background(isSelected ? tokens.canvasBackground : Color.clear)
+                                  .contentShape(Rectangle())
+                              }
+                              .buttonStyle(.plain)
+
+                              if idx < RightLedgerTab.allCases.count - 1 {
+                                  HairlineDivider(axis: .vertical, tokens: tokens)
+                                      .frame(height: 40)
+                              }
+                          }
+                      }
+                      .frame(height: 40)
+
+                      HairlineDivider(tokens: tokens)
+
+                      switch store.activeRightLedgerTab {
+                      case .studio:
+                          studioLedgerContent
+                      case .memory:
+                          memoryLedgerContent
+                      case .code:
+                          codeLedgerContent
+                      }
+                  }
+                  .background(tokens.sidebarBackground)
+                  .overlay(alignment: .leading) {
+                      HairlineDivider(axis: .vertical, tokens: tokens)
+                          .ignoresSafeArea()
+                  }
+              }
+
+              // MARK: - Tab 1: STUDIO (Model Selection, Presets, Architecture & Flat-Track Sampling Controls)
+              private var studioLedgerContent: some View {
+                  ScrollView(.vertical, showsIndicators: true) {
+                      if let session = activeSessionBinding {
+                          let model = store.activeModelDescriptor
+                          let modelProfile = model?.thinkingProfile ?? ModelThinkingProfile()
+                          let isLoading = store.isLoadingModelWeights
+                          let snap = store.memorySnapshot
+                          let loadFraction = isLoading ? CGFloat(min(0.99, max(0.03, snap.loadProgressAgainstTarget))) : 0.0
+                          let pct = Int(loadFraction * 100.0)
+                          let targetGB = max(0.1, snap.targetModelGB)
+                          let allocatedGB = min(targetGB, max(snap.weightsGB, snap.activeRAMDeltaGB))
+
+                          VStack(alignment: .leading, spacing: 14) {
+                              // 01 // MODEL SPECIFICATION & RESIDENCY
+                              VStack(alignment: .leading, spacing: 8) {
+                                  HStack {
+                                      Text("01 // MODEL")
+                                          .font(typo.mono(size: 9.5, weight: .semibold))
+                                          .tracking(0.8)
+                                          .foregroundColor(tokens.mutedText)
+                                      Spacer()
+                                      if let m = model {
+                                          Text(m.residency.rawValue.uppercased())
+                                              .font(typo.mono(size: 9.5, weight: .semibold))
+                                              .foregroundColor(m.residency == .activeInUnifiedRAM ? tokens.primaryText : tokens.mutedText)
+                                      }
+                                  }
+
+                                  if store.availableModels.isEmpty {
+                                      Text("No local models detected.")
+                                          .font(typo.sans(size: 11.5))
+                                          .foregroundColor(tokens.secondaryText)
+                                      ArchitecturalKeyButton("PULL MODEL IN SETTINGS", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                                          store.settingsRequestedSection = "04 // MODELS & STORAGE"
+                                          store.isSettingsViewActive = true
+                                      }
+                                  } else if let m = model {
+                                      Menu {
+                                          ForEach(store.availableModels) { candidate in
+                                              Button {
+                                                  store.selectModelOnly(candidate)
+                                              } label: {
+                                                  let tag = candidate.residency == .activeInUnifiedRAM ? "In RAM" : candidate.formattedSize
+                                                  Text("\(candidate.shortDisplayName) (\(tag))")
+                                              }
+                                          }
+                                          Divider()
+                                          Button("Refresh Local Models") {
+                                              Task {
+                                                  await store.refreshLocalEngineModels()
+                                                  await store.pollOllamaRunningProcesses()
+                                              }
+                                          }
+                                      } label: {
+                                          HStack {
+                                              Text(m.shortDisplayName)
+                                                  .font(typo.sans(size: 12.5, weight: .semibold))
+                                                  .foregroundColor(tokens.primaryText)
+                                                  .lineLimit(1)
+                                              Spacer()
+                                              Text("\(m.formattedSize) ▾")
+                                                  .font(typo.mono(size: 10.5))
+                                                  .foregroundColor(tokens.secondaryText)
+                                          }
+                                          .padding(.horizontal, 10)
+                                          .frame(height: 30)
+                                          .background(
+                                              RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                                  .fill(tokens.canvasBackground)
+                                          )
+                                          .overlay(
+                                              RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                                  .strokeBorder(tokens.strongBorder, lineWidth: 0.75)
+                                          )
+                                      }
+                                      .menuStyle(.borderlessButton)
+
+                                      if isLoading {
+                                          VStack(alignment: .leading, spacing: 5) {
+                                              HStack {
+                                                  Text(String(format: "LOADING %.1f / %.1f GB (%d%%)", allocatedGB, targetGB, pct))
+                                                      .font(typo.mono(size: 9.5, weight: .semibold))
+                                                      .foregroundColor(tokens.primaryText)
+                                                  Spacer()
+                                                  if store.isConfirmingModelLoadCancel {
+                                                      Button("CONFIRM CANCEL") {
+                                                          store.confirmCancelModelLoad()
+                                                      }
+                                                      .font(typo.mono(size: 9.5, weight: .bold))
+                                                      .foregroundColor(tokens.primaryText)
+                                                      .buttonStyle(.plain)
+                                                  } else {
+                                                      Button("CANCEL") {
+                                                          store.requestCancelModelLoadConfirmation()
+                                                      }
+                                                      .font(typo.mono(size: 9.5))
+                                                      .foregroundColor(tokens.secondaryText)
+                                                      .buttonStyle(.plain)
+                                                  }
+                                              }
+
+                                              GeometryReader { barGeo in
+                                                  ZStack(alignment: .leading) {
+                                                      Rectangle().fill(tokens.hairline)
+                                                      Rectangle()
+                                                          .fill(tokens.accentAction)
+                                                          .frame(width: max(4, barGeo.size.width * loadFraction))
+                                                  }
+                                              }
+                                              .frame(height: 3)
+                                          }
+                                      } else {
+                                          HStack(spacing: 6) {
+                                              if m.residency == .activeInUnifiedRAM {
+                                                  ArchitecturalKeyButton("UNLOAD RAM", tokens: tokens, typo: typo) {
+                                                      Task { await store.unloadModelFromMemory(m) }
+                                                  }
+                                              } else {
+                                                  ArchitecturalKeyButton("LOAD INTO RAM", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                                                      store.selectAndLoadModel(m)
+                                                  }
+                                              }
+
+                                              ArchitecturalKeyButton("TIGHT-RAM", tokens: tokens, typo: typo) {
+                                                  store.applyTightRAMOptimization()
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+
+                              HairlineDivider(tokens: tokens)
+
+                              // 02 // WRAPPING PRESETS GRID
+                              VStack(alignment: .leading, spacing: 8) {
+                                  HStack {
+                                      Text("02 // PRESETS (\(store.presets.count))")
+                                          .font(typo.mono(size: 9.5, weight: .semibold))
+                                          .tracking(0.8)
+                                          .foregroundColor(tokens.mutedText)
+                                      Spacer()
+                                      Button("+ SAVE") {
+                                          store.isNewPresetSheetPresented = true
+                                      }
+                                      .font(typo.mono(size: 9.5, weight: .semibold))
+                                      .foregroundColor(tokens.primaryText)
+                                      .buttonStyle(.plain)
+                                  }
+
+                                  LazyVGrid(columns: presetGridColumns, alignment: .leading, spacing: 5) {
+                                      ForEach(store.presets) { preset in
+                                          let isMatch = session.wrappedValue.parameters == preset.parameters
+                                          Button {
+                                              session.wrappedValue.parameters = preset.parameters
+                                              session.wrappedValue.systemPrompt = preset.systemPrompt
+                                              store.recordActiveModelParameterPreference()
+                                              if store.supervisor.kvCacheTypeEnv != preset.parameters.kvCacheQuant {
+                                                  store.applyKVCacheQuantizationLive(preset.parameters.kvCacheQuant)
+                                              } else {
+                                                  store.recalculateHardwareTelemetry()
+                                              }
+                                          } label: {
+                                              Text(preset.name)
+                                                  .font(typo.sans(size: 11, weight: isMatch ? .semibold : .medium))
+                                                  .foregroundColor(isMatch ? tokens.accentForeground : tokens.primaryText)
+                                                  .lineLimit(1)
+                                                  .padding(.horizontal, 8)
+                                                  .padding(.vertical, 5)
+                                                  .frame(maxWidth: .infinity, alignment: .center)
+                                                  .background(
+                                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                                          .fill(isMatch ? tokens.accentAction : tokens.canvasBackground)
+                                                  )
+                                                  .overlay(
+                                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                                          .strokeBorder(isMatch ? Color.clear : tokens.hairline, lineWidth: 0.75)
+                                                  )
+                                          }
+                                          .buttonStyle(.plain)
+                                          .help("\(preset.summary) — Right-click to update or delete")
+                                          .contextMenu {
+                                              Button("Update “\(preset.name)” with Current Settings") {
+                                                  store.updatePresetWithCurrentSettings(preset.id)
+                                              }
+                                              Divider()
+                                              Button("Delete Preset", role: .destructive) {
+                                                  store.deletePreset(preset.id)
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+
+                              HairlineDivider(tokens: tokens)
+
+                              // 03 // ARCHITECTURE (Thinking Mode, Context Window & Live KV Precision)
+                              VStack(alignment: .leading, spacing: 10) {
+                                  Text("03 // ARCHITECTURE")
+                                      .font(typo.mono(size: 9.5, weight: .semibold))
+                                      .tracking(0.8)
+                                      .foregroundColor(tokens.mutedText)
+
+                                  VStack(alignment: .leading, spacing: 5) {
+                                      HStack {
+                                          Text("Thinking Mode")
+                                              .font(typo.sans(size: 11.5, weight: .medium))
+                                              .foregroundColor(tokens.primaryText)
+                                          Spacer()
+                                          Text(modelProfile.kind.rawValue)
+                                              .font(typo.mono(size: 9.5))
+                                              .foregroundColor(tokens.mutedText)
+                                      }
+
+                                      if modelProfile.kind != .unsupported || session.wrappedValue.parameters.forceThinkingOverrideWhenUnsupported {
+                                          let allowedModes = session.wrappedValue.parameters.forceThinkingOverrideWhenUnsupported
+                                              ? ThinkingModeOption.allCases
+                                              : modelProfile.validOptions
+
+                                          HStack(spacing: 0) {
+                                              ForEach(Array(allowedModes.enumerated()), id: \.element.id) { idx, mode in
+                                                  let isSelected = session.wrappedValue.parameters.thinkingMode == mode
+                                                  Button {
+                                                      session.wrappedValue.parameters.thinkingMode = mode
+                                                      store.recordActiveModelParameterPreference()
+                                                  } label: {
+                                                      Text(mode.rawValue)
+                                                          .font(typo.mono(size: 10, weight: isSelected ? .bold : .medium))
+                                                          .foregroundColor(isSelected ? tokens.accentForeground : tokens.primaryText)
+                                                          .frame(maxWidth: .infinity)
+                                                          .frame(height: 24)
+                                                          .background(isSelected ? tokens.accentAction : tokens.canvasBackground)
+                                                  }
+                                                  .buttonStyle(.plain)
+
+                                                  if idx < allowedModes.count - 1 {
+                                                      HairlineDivider(axis: .vertical, tokens: tokens)
+                                                          .frame(height: 24)
+                                                  }
+                                              }
+                                          }
+                                          .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                                          .overlay(
+                                              RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                                  .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                          )
+                                      } else {
+                                          Toggle("Force thinking override", isOn: session.parameters.forceThinkingOverrideWhenUnsupported)
+                                              .font(typo.sans(size: 11))
+                                              .foregroundColor(tokens.secondaryText)
+                                      }
+                                  }
+
+                                  VStack(alignment: .leading, spacing: 5) {
+                                      HStack {
+                                          Text("Context Window")
+                                              .font(typo.sans(size: 11.5, weight: .medium))
+                                              .foregroundColor(tokens.primaryText)
+                                          Spacer()
+                                          Text("\(session.wrappedValue.parameters.numCtx) TOK")
+                                              .font(typo.mono(size: 10))
+                                              .foregroundColor(tokens.secondaryText)
+                                      }
+
+                                      let ctxChoices: [(String, Int)] = [("2k", 2048), ("4k", 4096), ("8k", 8192), ("16k", 16384), ("32k", 32768)]
+                                      HStack(spacing: 0) {
+                                          ForEach(Array(ctxChoices.enumerated()), id: \.offset) { idx, pair in
+                                              let isSelected = session.wrappedValue.parameters.numCtx == pair.1
+                                              Button {
+                                                  session.wrappedValue.parameters.numCtx = pair.1
+                                                  store.recordActiveModelParameterPreference()
+                                                  store.recalculateHardwareTelemetry()
+                                              } label: {
+                                                  Text(pair.0)
+                                                      .font(typo.mono(size: 10, weight: isSelected ? .bold : .medium))
+                                                      .foregroundColor(isSelected ? tokens.accentForeground : tokens.primaryText)
+                                                      .frame(maxWidth: .infinity)
+                                                      .frame(height: 24)
+                                                      .background(isSelected ? tokens.accentAction : tokens.canvasBackground)
+                                              }
+                                              .buttonStyle(.plain)
+
+                                              if idx < ctxChoices.count - 1 {
+                                                  HairlineDivider(axis: .vertical, tokens: tokens)
+                                                      .frame(height: 24)
+                                              }
+                                          }
+                                      }
+                                      .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                                      .overlay(
+                                          RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                              .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                      )
+                                  }
+
+                                  VStack(alignment: .leading, spacing: 5) {
+                                      Text("KV Cache Precision")
+                                          .font(typo.sans(size: 11.5, weight: .medium))
+                                          .foregroundColor(tokens.primaryText)
+
+                                      Picker("", selection: session.parameters.kvCacheQuant) {
+                                          ForEach(KVCacheQuantization.allCases) { q in
+                                              Text(q.displayTitle).tag(q)
+                                          }
+                                      }
+                                      .pickerStyle(.menu)
+                                      .labelsHidden()
+                                      .onChange(of: session.wrappedValue.parameters.kvCacheQuant) { _, newQuant in
+                                          store.applyKVCacheQuantizationLive(newQuant)
+                                      }
+                                  }
+                              }
+
+                              HairlineDivider(tokens: tokens)
+
+                              // 04 // SAMPLING (Custom Flat-Track Monochrome Sliders)
+                              VStack(alignment: .leading, spacing: 11) {
+                                  Text("04 // SAMPLING")
+                                      .font(typo.mono(size: 9.5, weight: .semibold))
+                                      .tracking(0.8)
+                                      .foregroundColor(tokens.mutedText)
+
+                                  ArchitecturalSlider(
+                                      title: "Temperature",
+                                      subtitle: "Controls randomness (0.15 deterministic · 0.70 balanced)",
+                                      value: session.parameters.temperature,
+                                      defaultValue: 0.70,
+                                      range: 0.0...2.0,
+                                      tokens: tokens,
+                                      typo: typo
+                                  )
+                                  .onChange(of: session.wrappedValue.parameters.temperature) { _, _ in
+                                      store.recordActiveModelParameterPreference()
+                                  }
+
+                                  ArchitecturalSlider(
+                                      title: "Top-P",
+                                      subtitle: "Nucleus probability mass cutoff",
+                                      value: session.parameters.topP,
+                                      defaultValue: 0.90,
+                                      range: 0.05...1.0,
+                                      tokens: tokens,
+                                      typo: typo
+                                  )
+
+                                  ArchitecturalSlider(
+                                      title: "Min-P",
+                                      subtitle: "Minimum probability scaled to top token",
+                                      value: session.parameters.minP,
+                                      defaultValue: 0.05,
+                                      range: 0.0...0.5,
+                                      tokens: tokens,
+                                      typo: typo
+                                  )
+
+                                  ArchitecturalSlider(
+                                      title: "Repeat Penalty",
+                                      subtitle: "Penalizes repeated token sequences",
+                                      value: session.parameters.repeatPenalty,
+                                      defaultValue: 1.10,
+                                      range: 0.8...1.6,
+                                      tokens: tokens,
+                                      typo: typo
+                                  )
+                              }
+
+                              HairlineDivider(tokens: tokens)
+
+                              // 05 // SYSTEM DIRECTIVE & ADVANCED CLI
+                              VStack(alignment: .leading, spacing: 8) {
+                                  Text("05 // SYSTEM DIRECTIVE")
+                                      .font(typo.mono(size: 9.5, weight: .semibold))
+                                      .tracking(0.8)
+                                      .foregroundColor(tokens.mutedText)
+
+                                  MotifStyledTextEditor(
+                                      text: session.systemPrompt,
+                                      font: typo.nsFont(size: 11.5),
+                                      tokens: tokens
+                                  )
+                                  .frame(height: 68)
+                                  .padding(4)
+                                  .background(tokens.canvasBackground)
+                                  .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                                  .overlay(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                  )
+
+                                  Button {
+                                      withAnimation(.easeOut(duration: 0.14)) {
+                                          isAdvancedCLIExpanded.toggle()
+                                      }
+                                  } label: {
+                                      HStack {
+                                          Text(isAdvancedCLIExpanded ? "▾ ADVANCED CLI OPTIONS" : "▸ ADVANCED CLI OPTIONS")
+                                              .font(typo.mono(size: 9.5, weight: .semibold))
+                                              .tracking(0.6)
+                                              .foregroundColor(tokens.secondaryText)
+                                          Spacer()
+                                      }
+                                      .padding(.top, 4)
+                                      .contentShape(Rectangle())
+                                  }
+                                  .buttonStyle(.plain)
+
+                                  if isAdvancedCLIExpanded {
+                                      VStack(alignment: .leading, spacing: 9) {
+                                          ArchitecturalIntStepperRow(title: "Batch Size (num_batch)", subtitle: "Lower values reduce Metal compute spikes", value: session.parameters.numBatch, defaultValue: 512, range: 32...2048, step: 64, tokens: tokens, typo: typo)
+                                          ArchitecturalIntStepperRow(title: "GPU Layers (-1 = Auto)", subtitle: "Transformer layers offloaded to GPU", value: session.parameters.numGpu, defaultValue: -1, range: -1...128, step: 1, tokens: tokens, typo: typo)
+                                          ArchitecturalIntStepperRow(title: "CPU Threads (0 = Auto)", subtitle: "0 uses fast Apple Silicon P-cores", value: session.parameters.numThread, defaultValue: 0, range: 0...32, step: 1, tokens: tokens, typo: typo)
+                                          ArchitecturalIntStepperRow(title: "Top-K", subtitle: "Top K sampling pool", value: session.parameters.topK, defaultValue: 40, range: 1...200, step: 5, tokens: tokens, typo: typo)
+                                          ArchitecturalIntStepperRow(title: "Max Output (num_predict)", subtitle: "Maximum tokens generated per reply", value: session.parameters.numPredict, defaultValue: 16384, range: 512...65536, step: 512, tokens: tokens, typo: typo)
+                                          ArchitecturalIntStepperRow(title: "Keep-Alive (min)", subtitle: "Minutes weights stay mapped in RAM", value: session.parameters.keepAliveMinutes, defaultValue: 15, range: 0...120, step: 5, tokens: tokens, typo: typo)
+                                          ArchitecturalIntStepperRow(title: "Seed (-1 = Random)", subtitle: "Deterministic RNG seed", value: session.parameters.seed, defaultValue: -1, range: -1...999999, step: 1, tokens: tokens, typo: typo)
+
+                                          Toggle("Memory-Map Weights (use_mmap)", isOn: session.parameters.useMmap)
+                                              .font(typo.sans(size: 11))
+                                          Toggle("Lock Weights in RAM (use_mlock)", isOn: session.parameters.useMlock)
+                                              .font(typo.sans(size: 11))
+                                          Toggle("Enforce JSON Output", isOn: session.parameters.enforceJSONMode)
+                                              .font(typo.sans(size: 11))
+                                      }
+                                      .padding(.top, 4)
+                                  }
+                              }
+                          }
+                          .padding(14)
+                          .background(OverlayScrollConfigurator(isDark: tokens.isEffectivelyDark).frame(width: 1, height: 1))
+                      }
+                  }
+              }
+
+              // MARK: - Tab 2: MEMORY (Unified Memory Spec Sheet with Dotted Watch Leaders)
+              private var memoryLedgerContent: some View {
+                  let snap = store.memorySnapshot
+                  return ScrollView(.vertical, showsIndicators: true) {
+                      VStack(alignment: .leading, spacing: 14) {
+                          HStack {
+                              Text("01 // UNIFIED MEMORY")
+                                  .font(typo.mono(size: 9.5, weight: .semibold))
+                                  .tracking(0.8)
+                                  .foregroundColor(tokens.mutedText)
+                              Spacer()
+                              Text(String(format: "%.2f GB FREE", snap.headroomGB))
+                                  .font(typo.mono(size: 10.5, weight: .bold))
+                                  .foregroundColor(tokens.primaryText)
+                          }
+
+                          // Monochrome Segmented Memory Bar (`3pt` chamfer)
+                          GeometryReader { geo in
+                              let totalW = geo.size.width
+                              let wWeights = max(0, CGFloat(snap.weightsFraction) * totalW)
+                              let wTotal = max(4, CGFloat(snap.usageFraction) * totalW)
+
+                              ZStack(alignment: .leading) {
+                                  RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                      .fill(tokens.elevatedSurface)
+                                      .frame(height: 6)
+
+                                  RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                      .fill(tokens.secondaryText.opacity(0.40))
+                                      .frame(width: min(totalW, wTotal), height: 6)
+
+                                  if wWeights > 0 {
+                                      RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                          .fill(tokens.accentAction)
+                                          .frame(width: min(totalW, wWeights), height: 6)
+                                  }
+                              }
+                          }
+                          .frame(height: 6)
+
+                          if snap.historySamplesGB.count > 2 {
+                              GeometryReader { geo in
+                                  let maxVal = max(snap.totalGB, 8.0)
+                                  Path { path in
+                                      for (idx, val) in snap.historySamplesGB.enumerated() {
+                                          let x = geo.size.width * CGFloat(idx) / CGFloat(max(1, snap.historySamplesGB.count - 1))
+                                          let y = geo.size.height * (1.0 - CGFloat(min(1.0, val / maxVal)))
+                                          if idx == 0 { path.move(to: CGPoint(x: x, y: y)) }
+                                          else { path.addLine(to: CGPoint(x: x, y: y)) }
+                                      }
+                                  }
+                                  .stroke(tokens.primaryText.opacity(0.65), lineWidth: 1.0)
+                              }
+                              .frame(height: 24)
+                          }
+
+                          HairlineDivider(tokens: tokens)
+
+                          VStack(spacing: 8) {
+                              DottedSpecLeaderRow("Free Headroom", value: String(format: "%.2f GB", snap.headroomGB), tokens: tokens, typo: typo)
+                              DottedSpecLeaderRow("Total RAM Used", value: String(format: "%.2f / %.0f GB", snap.usedGB, snap.totalGB), tokens: tokens, typo: typo)
+                              if let model = store.activeModelDescriptor {
+                                  DottedSpecLeaderRow("Target Model", value: model.formattedSize, tokens: tokens, typo: typo)
+                              }
+                              DottedSpecLeaderRow("Ollama Resident", value: String(format: "%.2f GB", snap.weightsGB), tokens: tokens, typo: typo)
+                              DottedSpecLeaderRow("Load Delta", value: String(format: "%@%.2f GB", snap.activeRAMDeltaGB >= 0 ? "+" : "", snap.activeRAMDeltaGB), tokens: tokens, typo: typo)
+                              DottedSpecLeaderRow("KV Cache (\(store.supervisor.kvCacheTypeEnv.rawValue.uppercased()))", value: String(format: "%.2f GB", snap.kvCacheGB), tokens: tokens, typo: typo)
+                              DottedSpecLeaderRow("Metal Ceiling", value: String(format: "%.1f GB", snap.metalMaxGB), tokens: tokens, typo: typo)
+                          }
+
+                          if let session = store.activeSession {
+                              HairlineDivider(tokens: tokens)
+
+                              let usedTok = session.estimatedActiveTokens
+                              let maxTok = max(1, session.parameters.numCtx)
+                              let pct = Int(min(100.0, (Double(usedTok) / Double(maxTok)) * 100.0))
+                              let thread = session.activeBranchThread
+
+                              VStack(alignment: .leading, spacing: 8) {
+                                  Text("02 // FOLIO CONTEXT")
+                                      .font(typo.mono(size: 9.5, weight: .semibold))
+                                      .tracking(0.8)
+                                      .foregroundColor(tokens.mutedText)
+
+                                  DottedSpecLeaderRow("Active Tokens", value: "\(usedTok) / \(maxTok) (\(pct)%)", tokens: tokens, typo: typo)
+
+                                  HStack(spacing: 6) {
+                                      ArchitecturalKeyButton("TRIM OLDEST", isDisabled: thread.isEmpty, tokens: tokens, typo: typo) {
+                                          store.trimOldestTurnInActiveSession()
+                                      }
+                                      ArchitecturalKeyButton("SUMMARIZE", isDisabled: thread.isEmpty, tokens: tokens, typo: typo) {
+                                          store.summarizeContextIntoNewBranch()
+                                      }
+                                  }
+                              }
+                          }
+
+                          if let loaded = store.availableModels.first(where: { $0.residency == .activeInUnifiedRAM }) {
+                              HairlineDivider(tokens: tokens)
+
+                              VStack(alignment: .leading, spacing: 8) {
+                                  Text("03 // RESIDENT WEIGHTS")
+                                      .font(typo.mono(size: 9.5, weight: .semibold))
+                                      .tracking(0.8)
+                                      .foregroundColor(tokens.mutedText)
+
+                                  HStack(spacing: 6) {
+                                      ArchitecturalKeyButton("RESET KV", tokens: tokens, typo: typo) {
+                                          store.clearActiveKVCacheInRAM()
+                                      }
+                                      ArchitecturalKeyButton("UNLOAD \(loaded.shortDisplayName.uppercased())", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                                          Task { await store.unloadModelFromMemory(loaded) }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                      .padding(14)
+                      .background(OverlayScrollConfigurator(isDark: tokens.isEffectivelyDark).frame(width: 1, height: 1))
+                  }
+              }
+
+              // MARK: - Tab 3: CODE (Extracted Snippets Ledger)
+              private var codeLedgerContent: some View {
+                  let artifacts = store.activeSession?.artifacts ?? []
+                  let currentArtifact: WorkspaceArtifact? = {
+                      if let id = store.selectedArtifactID, let match = artifacts.first(where: { $0.id == id }) {
+                          return match
+                      }
+                      return artifacts.first
+                  }()
+
+                  return VStack(alignment: .leading, spacing: 0) {
+                      if let artifact = currentArtifact {
+                          HStack(spacing: 6) {
+                              ArchitecturalKeyButton("SAVE FILE…", tokens: tokens, typo: typo) {
+                                  saveArtifactToDisk(artifact)
+                              }
+                              ArchitecturalKeyButton("OPEN EDITOR", tokens: tokens, typo: typo) {
+                                  openArtifactInExternalEditor(artifact)
+                              }
+                              Spacer()
+                          }
+                          .padding(.horizontal, 12)
+                          .padding(.vertical, 8)
+
+                          HairlineDivider(tokens: tokens)
+
+                          ScrollView(.horizontal, showsIndicators: false) {
+                              HStack(spacing: 4) {
+                                  ForEach(artifacts) { item in
+                                      let isSelected = item.id == artifact.id
+                                      Button {
+                                          store.selectedArtifactID = item.id
+                                      } label: {
+                                          Text(item.title)
+                                              .font(typo.mono(size: 10, weight: isSelected ? .bold : .regular))
+                                              .foregroundColor(isSelected ? tokens.accentForeground : tokens.primaryText)
+                                              .padding(.horizontal, 8)
+                                              .padding(.vertical, 4)
+                                              .background(
+                                                  RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                                      .fill(isSelected ? tokens.accentAction : tokens.canvasBackground)
+                                              )
+                                              .overlay(
+                                                  RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                                      .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                              )
+                                      }
+                                      .buttonStyle(.plain)
+                                  }
+                              }
+                              .padding(.horizontal, 12)
+                              .padding(.vertical, 7)
+                          }
+
+                          HairlineDivider(tokens: tokens)
+
+                          ScrollView(.vertical, showsIndicators: true) {
+                              MotifCodeBlockView(
+                                  language: artifact.language,
+                                  code: artifact.content,
+                                  tokens: tokens,
+                                  typo: typo,
+                                  onOpenInArtifactPane: {}
+                              )
+                              .padding(12)
+                              .background(OverlayScrollConfigurator(isDark: tokens.isEffectivelyDark).frame(width: 1, height: 1))
+                          }
+                      } else {
+                          VStack(alignment: .leading, spacing: 6) {
+                              Text("01 // CODE LEDGER")
+                                  .font(typo.mono(size: 9.5, weight: .semibold))
+                                  .tracking(0.8)
+                                  .foregroundColor(tokens.mutedText)
+                              Text("No fenced code blocks in this folio yet.")
+                                  .font(typo.sans(size: 12))
+                                  .foregroundColor(tokens.secondaryText)
+                              Spacer()
+                          }
+                          .padding(14)
+                      }
+                  }
+              }
+
+              private func saveArtifactToDisk(_ artifact: WorkspaceArtifact) {
+                  let panel = NSSavePanel()
+                  panel.title = "Save Code Snippet"
+                  let ext = artifact.language.isEmpty ? "txt" : artifact.language
+                  panel.nameFieldStringValue = "\(artifact.title.replacingOccurrences(of: " ", with: "_")).\(ext)"
+                  if panel.runModal() == .OK, let url = panel.url {
+                      try? artifact.content.write(to: url, atomically: true, encoding: .utf8)
+                  }
+              }
+
+              private func openArtifactInExternalEditor(_ artifact: WorkspaceArtifact) {
+                  let ext = artifact.language.isEmpty ? "txt" : artifact.language
+                  let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("BlackMotifSnippet.\(ext)")
+                  try? artifact.content.write(to: tempURL, atomically: true, encoding: .utf8)
+                  NSWorkspace.shared.open(tempURL)
+              }
+          }
+          EOF
+
+      - name: Generate In-Grid Settings Specification Page & Clean Dialog Sheets (UtilityAndModalViews.swift)
+        run: |
+          cat << 'EOF' > BlackMotif/Sources/BlackMotif/Views/UtilityAndModalViews.swift
+          import SwiftUI
+          import AppKit
+          import UniformTypeIdentifiers
+
+          public struct CreateNamedItemSheet: View {
+              public let heading: String
+              public let placeholder: String
+              public let tokens: MotifTokens
+              public let typo: TypographyConfiguration
+              public let onCommit: (String) -> Void
+              @Environment(\.dismiss) private var dismiss
+              @State private var nameDraft: String = ""
+
+              public var body: some View {
+                  VStack(alignment: .leading, spacing: 14) {
+                      Text(heading.uppercased())
+                          .font(typo.mono(size: 10.5, weight: .semibold))
+                          .tracking(0.8)
+                          .foregroundColor(tokens.primaryText)
+
+                      TextField(placeholder, text: $nameDraft)
+                          .textFieldStyle(.plain)
+                          .font(typo.sans(size: 13))
+                          .padding(8)
+                          .background(tokens.elevatedSurface)
+                          .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                          .overlay(
+                              RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                  .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                          )
+                          .onSubmit { commitAndClose() }
+
+                      HStack {
+                          Spacer()
+                          ArchitecturalKeyButton("CANCEL", tokens: tokens, typo: typo) {
+                              dismiss()
+                          }
+                          ArchitecturalKeyButton(
+                              "CREATE",
+                              isPrimaryStamp: true,
+                              isDisabled: nameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                              tokens: tokens,
+                              typo: typo
+                          ) {
+                              commitAndClose()
+                          }
+                      }
+                  }
+                  .padding(20)
+                  .frame(width: 340)
+                  .background(tokens.canvasBackground)
+              }
+
+              private func commitAndClose() {
+                  let trimmed = nameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !trimmed.isEmpty else { return }
+                  onCommit(trimmed)
+                  dismiss()
+              }
+          }
+
+          // MARK: - In-Grid Settings Specification Page (Renders Directly Inside Plane 2 — Zero Floating Modal Sheet!)
+          public struct InGridSettingsPageView: View {
+              @ObservedObject public var store: WorkstationStore
+              public let tokens: MotifTokens
+
+              @State private var pullModelInput: String = "gemma4:12b"
+              @State private var newPersonaTrigger: String = "/"
+              @State private var newPersonaTitle: String = ""
+              @State private var newPersonaPrompt: String = ""
+
+              private var typo: TypographyConfiguration { store.typography }
+
+              private func overrideBinding(for theme: AppThemeID) -> Binding<ThemeColorOverride> {
+                  Binding<ThemeColorOverride>(
+                      get: { store.customPalettes.override(for: theme) },
+                      set: { updated in store.customPalettes.setOverride(updated, for: theme) }
+                  )
+              }
+
+              private func canvasColorBinding(for theme: AppThemeID) -> Binding<Color> {
+                  let ov = overrideBinding(for: theme)
+                  return Binding<Color>(
+                      get: { Color(red: ov.wrappedValue.canvasRed, green: ov.wrappedValue.canvasGreen, blue: ov.wrappedValue.canvasBlue) },
+                      set: { newColor in
+                          if let cg = NSColor(newColor).usingColorSpace(.sRGB) {
+                              ov.wrappedValue.isCustomCanvasEnabled = true
+                              ov.wrappedValue.canvasRed = Double(cg.redComponent)
+                              ov.wrappedValue.canvasGreen = Double(cg.greenComponent)
+                              ov.wrappedValue.canvasBlue = Double(cg.blueComponent)
+                          }
+                      }
+                  )
+              }
+
+              private func accentColorBinding(for theme: AppThemeID) -> Binding<Color> {
+                  let ov = overrideBinding(for: theme)
+                  return Binding<Color>(
+                      get: { Color(red: ov.wrappedValue.accentRed, green: ov.wrappedValue.accentGreen, blue: ov.wrappedValue.accentBlue) },
+                      set: { newColor in
+                          if let cg = NSColor(newColor).usingColorSpace(.sRGB) {
+                              ov.wrappedValue.isCustomAccentEnabled = true
+                              ov.wrappedValue.accentRed = Double(cg.redComponent)
+                              ov.wrappedValue.accentGreen = Double(cg.greenComponent)
+                              ov.wrappedValue.accentBlue = Double(cg.blueComponent)
+                          }
+                      }
+                  )
+              }
+
+              private func thinkingColorBinding(for theme: AppThemeID) -> Binding<Color> {
+                  let ov = overrideBinding(for: theme)
+                  return Binding<Color>(
+                      get: { Color(red: ov.wrappedValue.thinkingRed, green: ov.wrappedValue.thinkingGreen, blue: ov.wrappedValue.thinkingBlue) },
+                      set: { newColor in
+                          if let cg = NSColor(newColor).usingColorSpace(.sRGB) {
+                              ov.wrappedValue.isCustomThinkingEnabled = true
+                              ov.wrappedValue.thinkingRed = Double(cg.redComponent)
+                              ov.wrappedValue.thinkingGreen = Double(cg.greenComponent)
+                              ov.wrappedValue.thinkingBlue = Double(cg.blueComponent)
+                          }
+                      }
+                  )
+              }
+
+              public var body: some View {
+                  ScrollView(.vertical, showsIndicators: true) {
+                      VStack(alignment: .leading, spacing: 24) {
+                          // 01 // MONOCHROME PALETTE & CUSTOM TINTS
+                          VStack(alignment: .leading, spacing: 10) {
+                              Text("01 // MONOCHROME PALETTE & CUSTOM TINTS")
+                                  .font(typo.mono(size: 10, weight: .semibold))
+                                  .tracking(0.8)
+                                  .foregroundColor(tokens.mutedText)
+
+                              ForEach(AppThemeID.allCases) { item in
+                                  let isCurrent = store.activeTheme == item
+                                  let previewTokens = MotifTokens(theme: item, isWindowActive: true)
+                                  VStack(alignment: .leading, spacing: 8) {
+                                      Button {
+                                          store.activeTheme = item
+                                      } label: {
+                                          HStack(spacing: 12) {
+                                              HStack(spacing: 0) {
+                                                  Rectangle().fill(previewTokens.canvasBackground)
+                                                  Rectangle().fill(previewTokens.thinkingSurface)
+                                                  Rectangle().fill(previewTokens.accentAction)
+                                              }
+                                              .frame(width: 42, height: 20)
+                                              .clipShape(RoundedRectangle(cornerRadius: 2.5, style: .continuous))
+                                              .overlay(
+                                                  RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                                      .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                              )
+
+                                              VStack(alignment: .leading, spacing: 2) {
+                                                  Text(item.rawValue)
+                                                      .font(typo.sans(size: 12.5, weight: .semibold))
+                                                      .foregroundColor(tokens.primaryText)
+                                                  Text(item.subtitle)
+                                                      .font(typo.sans(size: 11))
+                                                      .foregroundColor(tokens.secondaryText)
+                                              }
+                                              Spacer()
+                                              if isCurrent {
+                                                  Text("ACTIVE")
+                                                      .font(typo.mono(size: 9.5, weight: .bold))
+                                                      .foregroundColor(tokens.primaryText)
+                                              }
+                                          }
+                                          .padding(10)
+                                          .background(
+                                              RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                                  .fill(isCurrent ? tokens.selectionPill : tokens.elevatedSurface.opacity(0.55))
+                                          )
+                                          .overlay(
+                                              RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                                  .strokeBorder(isCurrent ? tokens.strongBorder : tokens.hairline, lineWidth: 0.75)
+                                          )
+                                      }
+                                      .buttonStyle(.plain)
+
+                                      if isCurrent {
+                                          let currentOverride = overrideBinding(for: item).wrappedValue
+                                          HStack(spacing: 14) {
+                                              ColorPicker("Paper Canvas", selection: canvasColorBinding(for: item), supportsOpacity: false)
+                                                  .font(typo.sans(size: 11, weight: .medium))
+                                              ColorPicker("Ink Stamp", selection: accentColorBinding(for: item), supportsOpacity: false)
+                                                  .font(typo.sans(size: 11, weight: .medium))
+                                              ColorPicker("Thinking Vellum", selection: thinkingColorBinding(for: item), supportsOpacity: false)
+                                                  .font(typo.sans(size: 11, weight: .medium))
+                                              Spacer()
+                                              ArchitecturalKeyButton(
+                                                  "RESET DEFAULT",
+                                                  isDisabled: !currentOverride.isModified,
+                                                  tokens: tokens,
+                                                  typo: typo
+                                              ) {
+                                                  store.resetCustomPalette(for: item)
+                                              }
+                                          }
+                                          .padding(.horizontal, 12)
+                                          .padding(.vertical, 8)
+                                          .background(tokens.elevatedSurface.opacity(0.45))
+                                          .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                                      }
+                                  }
+                              }
+                          }
+
+                          HairlineDivider(tokens: tokens)
+
+                          // 02 // 3-FONT EDITORIAL MIXER & OPTICAL SCALING
+                          VStack(alignment: .leading, spacing: 12) {
+                              Text("02 // 3-FONT EDITORIAL MIXER & OPTICAL SCALING")
+                                  .font(typo.mono(size: 10, weight: .semibold))
+                                  .tracking(0.8)
+                                  .foregroundColor(tokens.mutedText)
+
+                              Picker("Headings & Wordmark Font", selection: $store.typography.displayFont) {
+                                  ForEach(DisplayFontChoice.allCases) { f in
+                                      Text(f.rawValue).tag(f)
+                                  }
+                              }
+                              .font(typo.sans(size: 12))
+
+                              Picker("Reading Prose Font", selection: $store.typography.proseFont) {
+                                  ForEach(ProseFontChoice.allCases) { f in
+                                      Text(f.rawValue).tag(f)
+                                  }
+                              }
+                              .font(typo.sans(size: 12))
+
+                              Picker("Technical & Thinking Monospace", selection: $store.typography.monoFont) {
+                                  ForEach(MonoFontChoice.allCases) { f in
+                                      Text(f.rawValue).tag(f)
+                                  }
+                              }
+                              .font(typo.sans(size: 12))
+
+                              ArchitecturalSlider(
+                                  title: "Windowed Reading Text Size",
+                                  subtitle: "Base optical size in windowed mode (pt)",
+                                  value: $store.typography.windowedBaseFontSize,
+                                  defaultValue: 13.5,
+                                  range: 11.5...18.0,
+                                  tokens: tokens,
+                                  typo: typo
+                              )
+
+                              ArchitecturalSlider(
+                                  title: "Fullscreen Reading Text Size",
+                                  subtitle: "Base optical size in fullscreen mode (pt)",
+                                  value: $store.typography.fullscreenBaseFontSize,
+                                  defaultValue: 15.5,
+                                  range: 13.0...21.0,
+                                  tokens: tokens,
+                                  typo: typo
+                              )
+                          }
+
+                          HairlineDivider(tokens: tokens)
+
+                          // 03 // SLASH COMMAND PERSONAS (/)
+                          VStack(alignment: .leading, spacing: 10) {
+                              Text("03 // SLASH COMMAND PERSONAS (/)")
+                                  .font(typo.mono(size: 10, weight: .semibold))
+                                  .tracking(0.8)
+                                  .foregroundColor(tokens.mutedText)
+
+                              VStack(alignment: .leading, spacing: 8) {
+                                  HStack(spacing: 8) {
+                                      TextField("/trigger", text: $newPersonaTrigger)
+                                          .textFieldStyle(.roundedBorder)
+                                          .font(typo.mono(size: 11))
+                                          .frame(width: 110)
+                                      TextField("Persona title (e.g. Systems Reviewer)", text: $newPersonaTitle)
+                                          .textFieldStyle(.roundedBorder)
+                                          .font(typo.sans(size: 12))
+                                  }
+
+                                  MotifStyledTextEditor(
+                                      text: $newPersonaPrompt,
+                                      font: typo.nsFont(size: 12),
+                                      tokens: tokens
+                                  )
+                                  .frame(height: 76)
+                                  .padding(5)
+                                  .background(tokens.canvasBackground)
+                                  .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                                  .overlay(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                  )
+
+                                  HStack {
+                                      Spacer()
+                                      ArchitecturalKeyButton("SAVE PERSONA", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                                          var trig = newPersonaTrigger.trimmingCharacters(in: .whitespacesAndNewlines)
+                                          if !trig.hasPrefix("/") { trig = "/" + trig }
+                                          let title = newPersonaTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                                          let prompt = newPersonaPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                                          guard trig.count > 1, !title.isEmpty, !prompt.isEmpty else { return }
+                                          store.slashPersonas.append(SlashPersona(trigger: trig, title: title, systemPrompt: prompt))
+                                          store.saveAllState()
+                                          newPersonaTrigger = "/"
+                                          newPersonaTitle = ""
+                                          newPersonaPrompt = ""
+                                      }
+                                  }
+                              }
+                              .padding(12)
+                              .background(tokens.elevatedSurface.opacity(0.55))
+                              .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+
+                              ForEach(store.slashPersonas) { persona in
+                                  HStack(alignment: .top) {
+                                      VStack(alignment: .leading, spacing: 2) {
+                                          HStack(spacing: 6) {
+                                              Text(persona.trigger)
+                                                  .font(typo.mono(size: 11, weight: .semibold))
+                                                  .foregroundColor(tokens.primaryText)
+                                              Text(persona.title)
+                                                  .font(typo.sans(size: 12, weight: .medium))
+                                                  .foregroundColor(tokens.secondaryText)
+                                          }
+                                          Text(persona.systemPrompt)
+                                              .font(typo.sans(size: 11))
+                                              .foregroundColor(tokens.mutedText)
+                                      }
+                                      Spacer()
+                                      Button("DELETE") {
+                                          store.slashPersonas.removeAll { $0.id == persona.id }
+                                          store.saveAllState()
+                                      }
+                                      .font(typo.mono(size: 9.5))
+                                      .foregroundColor(tokens.mutedText)
+                                      .buttonStyle(.plain)
+                                  }
+                              }
+                          }
+
+                          HairlineDivider(tokens: tokens)
+
+                          // 04 // MODELS & STORAGE
+                          VStack(alignment: .leading, spacing: 10) {
+                              Text("04 // MODELS & STORAGE")
+                                  .font(typo.mono(size: 10, weight: .semibold))
+                                  .tracking(0.8)
+                                  .foregroundColor(tokens.mutedText)
+
+                              HStack {
+                                  TextField("Pull model tag (e.g. gemma4:12b, qwen3:8b)…", text: $pullModelInput)
+                                      .textFieldStyle(.roundedBorder)
+                                  ArchitecturalKeyButton("PULL", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                                      store.startModelDownload(reference: pullModelInput)
+                                  }
+                              }
+
+                              ForEach(store.downloadTasks) { task in
+                                  VStack(alignment: .leading, spacing: 4) {
+                                      HStack {
+                                          Text(task.modelReference).font(typo.mono(size: 10.5, weight: .semibold))
+                                          Spacer()
+                                          Text(task.formattedProgressGB)
+                                              .font(typo.mono(size: 10))
+                                              .foregroundColor(tokens.secondaryText)
+                                          if !task.isCompleted {
+                                              Button("CANCEL") {
+                                                  store.cancelModelDownload(task.id)
+                                              }
+                                              .font(typo.mono(size: 9.5, weight: .semibold))
+                                              .buttonStyle(.plain)
+                                          }
+                                      }
+                                      ProgressView(value: task.progressFraction)
+                                  }
+                              }
+
+                              HStack {
+                                  VStack(alignment: .leading, spacing: 2) {
+                                      Text("External Model Directory (OLLAMA_MODELS)")
+                                          .font(typo.sans(size: 12, weight: .medium))
+                                      Text(store.driveManager.externalVolumePath.isEmpty ? "~/.ollama/models (Default)" : store.driveManager.externalVolumePath)
+                                          .font(typo.mono(size: 10))
+                                          .foregroundColor(tokens.secondaryText)
+                                  }
+                                  Spacer()
+                                  ArchitecturalKeyButton("SELECT FOLDER…", tokens: tokens, typo: typo) {
+                                      store.selectExternalDriveAndReloadModels()
+                                  }
+                              }
+                          }
+
+                          HairlineDivider(tokens: tokens)
+
+                          // 05 // ENGINE SUPERVISOR & KEYBOARD SHORTCUTS
+                          VStack(alignment: .leading, spacing: 10) {
+                              Text("05 // ENGINE SUPERVISOR & SHORTCUTS")
+                                  .font(typo.mono(size: 10, weight: .semibold))
+                                  .tracking(0.8)
+                                  .foregroundColor(tokens.mutedText)
+
+                              Text(store.supervisor.supervisorStatusLog)
+                                  .font(typo.mono(size: 10.5))
+                                  .foregroundColor(tokens.secondaryText)
+
+                              TextField("Endpoint URL", text: $store.supervisor.engineEndpoint)
+                                  .textFieldStyle(.roundedBorder)
+
+                              Picker("Daemon KV Cache Quantization", selection: $store.supervisor.kvCacheTypeEnv) {
+                                  ForEach(KVCacheQuantization.allCases) { q in
+                                      Text(q.displayTitle).tag(q)
+                                  }
+                              }
+                              .font(typo.sans(size: 12))
+
+                              Toggle("Enable Flash Attention (OLLAMA_FLASH_ATTENTION=1)", isOn: $store.supervisor.enableFlashAttentionEnv)
+                                  .font(typo.sans(size: 12))
+                              Toggle("Release model RAM when window is minimized", isOn: $store.supervisor.autoUnloadOnMinimize)
+                                  .font(typo.sans(size: 12))
+                              Toggle("Use thinking when summarizing context (Off = fast summary)", isOn: $store.supervisor.useThinkingForSummary)
+                                  .font(typo.sans(size: 12))
+
+                              HStack(spacing: 10) {
+                                  ArchitecturalKeyButton("APPLY & RESTART DAEMON", isPrimaryStamp: true, tokens: tokens, typo: typo) {
+                                      store.applyDaemonConfigurationAndRestart()
+                                  }
+                                  ArchitecturalKeyButton("STOP DAEMON", tokens: tokens, typo: typo) {
+                                      store.supervisor.terminateManagedDaemonGracefully()
+                                  }
+                              }
+                          }
+                      }
+                      .frame(maxWidth: 740, alignment: .leading)
+                      .padding(28)
+                      .frame(maxWidth: .infinity)
+                      .background(OverlayScrollConfigurator(isDark: tokens.isEffectivelyDark).frame(width: 1, height: 1))
+                  }
+              }
+          }
+          EOF
+
+      - name: Generate True Edge-to-Edge Fullscreen Three-Plane Folio Root (MotifApp.swift)
+        run: |
+          cat << 'EOF' > BlackMotif/Sources/BlackMotif/MotifApp.swift
+          import SwiftUI
+          import AppKit
+
+          // MARK: - AppKit Window Configurator (True Fullscreen Without NSToolbar Chrome)
+          public struct FullSizeWindowConfigurator: NSViewRepresentable {
+              public let isDark: Bool
+
+              public init(isDark: Bool) {
+                  self.isDark = isDark
+              }
+
+              public func makeNSView(context: Context) -> NSView {
+                  let view = NSView()
+                  DispatchQueue.main.async {
+                      guard let window = view.window else { return }
+                      window.titleVisibility = .hidden
+                      window.titlebarAppearsTransparent = true
+                      window.styleMask.insert(.fullSizeContentView)
+                      window.toolbar = nil
+                      window.appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
+                  }
+                  return view
+              }
+
+              public func updateNSView(_ nsView: NSView, context: Context) {
+                  DispatchQueue.main.async {
+                      guard let window = nsView.window else { return }
+                      if window.toolbar != nil {
+                          window.toolbar = nil
+                      }
+                      if !window.styleMask.contains(.fullSizeContentView) {
+                          window.styleMask.insert(.fullSizeContentView)
+                      }
+                      let targetApp = NSAppearance(named: isDark ? .darkAqua : .aqua)
+                      if window.appearance != targetApp {
+                          window.appearance = targetApp
+                      }
+                  }
+              }
+          }
+
+          public struct BlackMotifRootView: View {
+              @ObservedObject public var store: WorkstationStore
+              @Environment(\.controlActiveState) private var controlActiveState
+
+              private var isWindowActive: Bool {
+                  controlActiveState != .inactive
+              }
+
+              private var tokens: MotifTokens {
+                  MotifTokens(theme: store.activeTheme, isWindowActive: isWindowActive)
+              }
+
+              private var typo: TypographyConfiguration { store.typography }
+
+              public var body: some View {
+                  GeometryReader { geo in
+                      HStack(spacing: 0) {
+                          // Plane 1: Left Index Ledger
+                          if store.isSidebarVisible {
+                              SidebarNavigationView(store: store, tokens: tokens)
+                                  .frame(width: store.sidebarWidth)
+                          }
+
+                          // Plane 2: Center Reading Sheet (or In-Grid Settings Specification Page)
+                          EditorialConversationView(store: store, tokens: tokens)
+                              .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                          // Plane 3: Right Studio, Memory & Code Ledger
+                          if store.isStudioLedgerVisible && !store.isSettingsViewActive {
+                              RightStudioLedgerView(store: store, tokens: tokens)
+                                  .frame(width: store.studioLedgerWidth)
+                          }
+                      }
+                      .background(FullSizeWindowConfigurator(isDark: tokens.isEffectivelyDark).frame(width: 0, height: 0))
+                      .background(tokens.canvasBackground)
+                      .ignoresSafeArea(.container, edges: .top)
+                      .onChange(of: geo.size.width) { _, newWidth in
+                          if newWidth < 1060 && store.isStudioLedgerVisible && store.isSidebarVisible {
+                              store.isStudioLedgerVisible = false
+                          }
+                      }
+                  }
+                  .sheet(isPresented: $store.isNewWorkspaceSheetPresented) {
+                      CreateNamedItemSheet(
+                          heading: "New Workspace",
+                          placeholder: "Workspace name (e.g. Architecture)",
+                          tokens: tokens,
+                          typo: typo
+                      ) { name in
+                          store.createWorkspace(name: name)
+                      }
+                  }
+                  .sheet(isPresented: $store.isNewPresetSheetPresented) {
+                      CreateNamedItemSheet(
+                          heading: "Save Parameter Preset",
+                          placeholder: "Preset name (e.g. Deep Reasoning)",
+                          tokens: tokens,
+                          typo: typo
+                      ) { name in
+                          store.createPreset(name: name)
+                      }
+                  }
+                  .alert(
+                      "Large Model Memory Warning",
+                      isPresented: Binding(
+                          get: { store.pendingSSDSwapWarningModel != nil },
+                          set: { if !$0 { store.pendingSSDSwapWarningModel = nil } }
+                      ),
+                      presenting: store.pendingSSDSwapWarningModel
+                  ) { targetModel in
+                      Button("Load with Tight-RAM Optimization (Recommended)") {
+                          store.pendingSSDSwapWarningModel = nil
+                          store.applyTightRAMOptimization(andLoadModel: targetModel)
+                      }
+                      Button("Load Anyway (May Use SSD Swap)") {
+                          store.selectAndLoadModel(targetModel, bypassSwapGuard: true)
+                      }
+                      Button("Cancel", role: .cancel) {
+                          store.pendingSSDSwapWarningModel = nil
+                      }
+                  } message: { targetModel in
+                      let reclaimableGB = Double(store.liveOllamaResidentBytes) / 1_073_741_824.0
+                      let availableGB = store.memorySnapshot.headroomGB + reclaimableGB
+                      Text("“\(targetModel.shortDisplayName)” requires \(targetModel.formattedSize), and \(String(format: "%.1f GB", availableGB)) is currently available before swap.")
+                  }
+              }
+          }
+
+          public final class BlackMotifAppDelegate: NSObject, NSApplicationDelegate {
+              public func applicationDidFinishLaunching(_ notification: Notification) {
+                  CustomFontRegistrar.registerBundledFonts()
+                  NSWindow.allowsAutomaticWindowTabbing = false
+              }
+          }
+
+          @main
+          public struct BlackMotifApp: App {
+              @NSApplicationDelegateAdaptor(BlackMotifAppDelegate.self) private var appDelegate
+              @StateObject private var store = WorkstationStore()
+
+              private func keyEq(_ raw: String, fallback: Character) -> KeyEquivalent {
+                  let ch = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().first ?? fallback
+                  return KeyEquivalent(ch)
+              }
+
+              public var body: some Scene {
+                  WindowGroup("BlackMotif") {
+                      let rootTokens = MotifTokens(theme: store.activeTheme, isWindowActive: true)
+                      BlackMotifRootView(store: store)
+                          .frame(minWidth: 860, minHeight: 540)
+                          .preferredColorScheme(rootTokens.isEffectivelyDark ? .dark : .light)
+                  }
+                  .windowStyle(.hiddenTitleBar)
+                  .commands {
+                      CommandGroup(replacing: .appSettings) {
+                          Button("Settings…") {
+                              store.isSettingsViewActive.toggle()
+                          }
+                          .keyboardShortcut(",", modifiers: [.command])
+                      }
+
+                      CommandGroup(replacing: .newItem) {
+                          Button("New Folio") {
+                              store.createNewSession(folderID: nil)
+                          }
+                          .keyboardShortcut(keyEq(store.shortcuts.newChatKey, fallback: "n"), modifiers: [.command])
+
+                          Button("Toggle Index Ledger") {
+                              store.isSidebarVisible.toggle()
+                          }
+                          .keyboardShortcut(keyEq(store.shortcuts.toggleSidebarKey, fallback: "s"), modifiers: [.command])
+
+                          Button("Toggle Studio Ledger") {
+                              store.isStudioLedgerVisible.toggle()
+                          }
+                          .keyboardShortcut(keyEq(store.shortcuts.toggleInspectorKey, fallback: "\\"), modifiers: [.command])
+
+                          Divider()
+
+                          Button("Increase Text Size") {
+                              store.adjustActiveFontSize(delta: 0.5)
+                          }
+                          .keyboardShortcut("=", modifiers: [.command])
+
+                          Button("Decrease Text Size") {
+                              store.adjustActiveFontSize(delta: -0.5)
+                          }
+                          .keyboardShortcut("-", modifiers: [.command])
+
+                          Divider()
+
+                          Button("Stop Generation") {
+                              store.stopActiveGeneration()
+                          }
+                          .keyboardShortcut(keyEq(store.shortcuts.stopGenerationKey, fallback: "."), modifiers: [.command])
+                      }
+                  }
+              }
+          }
+          EOF
+
+      - name: Compile Release Universal Binary (Swift 6)
+        run: |
+          cd BlackMotif
+          swift build -c release --arch arm64
+          ls -lh .build/arm64-apple-macosx/release/BlackMotif
+
+      - name: Assemble BlackMotif Application Bundle (.app)
+        run: |
+          set -e
+          rm -rf build/dmg_staging/*
+          APP_BUNDLE="build/dmg_staging/${APP_NAME}.app"
+          mkdir -p "${APP_BUNDLE}/Contents/MacOS"
+          mkdir -p "${APP_BUNDLE}/Contents/Resources/Fonts"
+
+          cp BlackMotif/.build/arm64-apple-macosx/release/BlackMotif "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+          chmod +x "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+
+          cp build/AppIcon.icns "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
+          cp -R BlackMotif/Sources/BlackMotif/Resources/Fonts/* "${APP_BUNDLE}/Contents/Resources/Fonts/" 2>/dev/null || true
+
+          if [ -d "BlackMotif/.build/arm64-apple-macosx/release/BlackMotif_BlackMotif.bundle" ]; then
+            cp -R "BlackMotif/.build/arm64-apple-macosx/release/BlackMotif_BlackMotif.bundle" "${APP_BUNDLE}/Contents/Resources/"
+          fi
+
+          cat << EOF > "${APP_BUNDLE}/Contents/Info.plist"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleExecutable</key>
+              <string>${APP_NAME}</string>
+              <key>CFBundleIconFile</key>
+              <string>AppIcon</string>
+              <key>CFBundleIdentifier</key>
+              <string>${BUNDLE_ID}</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>${DISPLAY_NAME}</string>
+              <key>CFBundleDisplayName</key>
+              <string>${DISPLAY_NAME}</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>${VERSION}</string>
+              <key>CFBundleVersion</key>
+              <string>${BUILD_NUMBER}</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>14.0</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+              <key>NSSupportsAutomaticGraphicsSwitching</key>
+              <true/>
+              <key>NSAppTransportSecurity</key>
+              <dict>
+                  <key>NSAllowsArbitraryLoads</key>
+                  <true/>
+              </dict>
+          </dict>
+          </plist>
+          EOF
+
+          codesign --force --deep --sign - "${APP_BUNDLE}"
+          codesign --verify --verbose "${APP_BUNDLE}"
+
+      - name: Package Compressed macOS Disk Image (.dmg)
+        run: |
+          set -e
+          ln -fsn /Applications build/dmg_staging/Applications
+          DMG_NAME="${APP_NAME}-${VERSION}-macOS-arm64.dmg"
+          rm -f "build/${DMG_NAME}"
+          hdiutil create \
+            -volname "${DISPLAY_NAME}" \
+            -srcfolder build/dmg_staging \
+            -ov \
+            -format UDZO \
+            "build/${DMG_NAME}"
+          ls -lh "build/${DMG_NAME}"
+
+      - name: Upload Compiled DMG Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlackMotif-macOS-AppleSilicon-DMG
+          path: build/*.dmg
+          if-no-files-found: error
+          retention-days: 30
