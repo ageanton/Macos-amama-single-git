@@ -3685,4 +3685,2487 @@ jobs:
                       parent.activeChildIndex = parent.childrenIDs.count - 1
                       sessions[sessionIdx].nodes[parentID] = parent
                   } else {
-                      sessions[sessionIdx].rootMessageIDs.append(node
+                      sessions[sessionIdx].rootMessageIDs.append(node.id)
+                      sessions[sessionIdx].activeRootIndex = sessions[sessionIdx].rootMessageIDs.count - 1
+                  }
+                  sessions[sessionIdx].updatedAt = Date()
+              }
+
+              // MARK: - Stop-Safe, KV-Cache-Preserving & Orphan-Filtered Ollama `/api/chat` Streaming
+              private func streamAssistantResponse(
+                  parentUserNodeID: UUID,
+                  inSessionID targetSessionID: UUID,
+                  continuingAssistantNodeID: UUID?,
+                  overrideModelName: String?
+              ) {
+                  streamingTask?.cancel()
+                  guard let initialIdx = sessions.firstIndex(where: { $0.id == targetSessionID }) else { return }
+
+                  let resolvedModel: LocalModelDescriptor?
+                  if let override = overrideModelName, let matched = availableModels.first(where: { $0.name == override || $0.shortDisplayName == override }) {
+                      resolvedModel = matched
+                  } else {
+                      resolvedModel = activeModelDescriptor
+                  }
+                  guard let model = resolvedModel else { return }
+
+                  let sessionParams = sessions[initialIdx].parameters
+                  let isSummaryTurn = sessions[initialIdx].nodes[parentUserNodeID]?.isSummaryHandoffRequest == true
+                  let modelSupportsThinking = model.thinkingProfile.kind != .unsupported || sessionParams.forceThinkingOverrideWhenUnsupported
+
+                  let shouldThink: Bool
+                  if isSummaryTurn {
+                      shouldThink = modelSupportsThinking && supervisor.useThinkingForSummary
+                  } else {
+                      shouldThink = modelSupportsThinking && sessionParams.thinkingMode.isThinkingEnabled
+                  }
+
+                  let assistantID: UUID
+                  let initialThinking: String
+                  let initialAnswer: String
+                  let resumeInThinking: Bool
+                  let priorThinkSec: Double
+                  let priorAnswerTokens: Int
+                  let priorThinkingTokens: Int
+
+                  if let contID = continuingAssistantNodeID, var existing = sessions[initialIdx].nodes[contID] {
+                      resumeInThinking = existing.wasStoppedMidThinking && existing.content.isEmpty
+                      priorThinkSec = existing.metrics?.thinkingDurationSec ?? 0.0
+                      priorAnswerTokens = existing.metrics?.totalTokens ?? 0
+                      priorThinkingTokens = existing.metrics?.thinkingTokens ?? 0
+                      existing.wasStoppedMidStream = false
+                      existing.wasStoppedMidThinking = false
+                      existing.errorNote = nil
+                      if resumeInThinking {
+                          existing.isThinkingComplete = false
+                          existing.isThinkingExpanded = true
+                      }
+                      sessions[initialIdx].nodes[contID] = existing
+                      assistantID = contID
+                      initialThinking = existing.thinkingTrace
+                      initialAnswer = existing.content
+                  } else {
+                      resumeInThinking = false
+                      priorThinkSec = 0.0
+                      priorAnswerTokens = 0
+                      priorThinkingTokens = 0
+                      let placeholderAssistant = ConversationMessageNode(
+                          parentID: parentUserNodeID,
+                          role: .assistant,
+                          content: "",
+                          thinkingTrace: "",
+                          isThinkingComplete: !shouldThink,
+                          isThinkingExpanded: true,
+                          modelUsed: model.shortDisplayName
+                      )
+                      appendNodeToTree(placeholderAssistant, inSessionAt: initialIdx)
+                      assistantID = placeholderAssistant.id
+                      initialThinking = ""
+                      initialAnswer = ""
+                  }
+
+                  let parser = StatefulThinkingStreamParser()
+                  parser.preloadExisting(
+                      thinking: initialThinking,
+                      answer: initialAnswer,
+                      resumeInsideThinking: resumeInThinking,
+                      priorThinkingDuration: priorThinkSec
+                  )
+                  self.activeStreamParser = parser
+
+                  isStreamingGeneration = true
+                  streamingSessionID = targetSessionID
+                  streamingNodeID = assistantID
+                  liveTokensPerSec = 0.0
+                  liveTotalTokens = priorAnswerTokens
+                  liveThinkingTokens = priorThinkingTokens
+                  liveElapsedSeconds = priorThinkSec
+
+                  let neededInitialLoad = (model.residency != .activeInUnifiedRAM)
+                  if neededInitialLoad {
+                      baselineOllamaRSSBeforeLoad = HardwareMemoryEngine.queryOllamaProcessResidentBytes()
+                      baselineRAMBytesBeforeLoad = memorySnapshot.totalSystemUsedBytes
+                      targetLoadingModelBytes = max(1, model.sizeBytes)
+                      withAnimation(.easeInOut(duration: 0.25)) {
+                          isLoadingModelWeights = true
+                          loadingModelName = model.shortDisplayName
+                          loadingModelInternalID = model.name
+                      }
+                      recalculateHardwareTelemetry()
+                  }
+
+                  let fullThread = sessions[initialIdx].activeBranchThread
+                  let historyUpToParent = fullThread.filter { $0.id != assistantID }
+                  let systemPromptCopy = sessions[initialIdx].systemPrompt
+                  let endpoint = supervisor.normalizedEndpoint
+
+                  streamingTask = Task {
+                      let startWall = Date()
+
+                      guard let url = URL(string: "\(endpoint)/api/chat") else {
+                          self.isStreamingGeneration = false
+                          self.isLoadingModelWeights = false
+                          return
+                      }
+
+                      var request = URLRequest(url: url)
+                      request.httpMethod = "POST"
+                      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                      request.timeoutInterval = 3600.0
+
+                      var apiMessages: [[String: Any]] = []
+                      if !systemPromptCopy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                          apiMessages.append(["role": "system", "content": systemPromptCopy])
+                      }
+
+                      // Skip unanswered historical `.user` turns so deleting an AI reply never merges old questions with new ones
+                      for (idx, turn) in historyUpToParent.enumerated() {
+                          if turn.role == .user && turn.id != parentUserNodeID {
+                              let hasAssistantReplyNext = (idx + 1 < historyUpToParent.count) && (historyUpToParent[idx + 1].role == .assistant)
+                              if !hasAssistantReplyNext {
+                                  continue
+                              }
+                          }
+                          let textContent = turn.apiPromptOverride ?? turn.content
+                          var msgDict: [String: Any] = [
+                              "role": turn.role.rawValue,
+                              "content": textContent
+                          ]
+                          let imagesBase64: [String] = turn.attachments.compactMap { att in
+                              if let memB64 = att.base64ImagePayload, !memB64.isEmpty { return memB64 }
+                              if att.kind == .downscaledVisionImage, let fname = att.localAssetFilename {
+                                  return self.vault.loadHeavyAssetBase64(filename: fname)
+                              }
+                              return nil
+                          }
+                          if !imagesBase64.isEmpty {
+                              msgDict["images"] = imagesBase64
+                          }
+                          apiMessages.append(msgDict)
+                      }
+
+                      if continuingAssistantNodeID != nil {
+                          if !initialAnswer.isEmpty {
+                              apiMessages.append(["role": "assistant", "content": initialAnswer])
+                              apiMessages.append([
+                                  "role": "user",
+                                  "content": "Continue writing directly from the exact word where you stopped: \"\(initialAnswer.suffix(140))\". Do not repeat what was already written."
+                              ])
+                          } else if !initialThinking.isEmpty {
+                              apiMessages.append([
+                                  "role": "user",
+                                  "content": "You were in the middle of thinking:\n\"\(initialThinking.suffix(400))\"\nFinish your reasoning briefly and provide the complete final answer."
+                              ])
+                          }
+                      }
+
+                      var optionsDict: [String: Any] = [
+                          "temperature": sessionParams.temperature,
+                          "top_k": sessionParams.topK,
+                          "top_p": sessionParams.topP,
+                          "min_p": sessionParams.minP,
+                          "typical_p": sessionParams.typicalP,
+                          "repeat_penalty": sessionParams.repeatPenalty,
+                          "repeat_last_n": sessionParams.repeatLastN,
+                          "presence_penalty": sessionParams.presencePenalty,
+                          "frequency_penalty": sessionParams.frequencyPenalty,
+                          "mirostat": sessionParams.mirostat.rawValue,
+                          "mirostat_tau": sessionParams.mirostatTau,
+                          "mirostat_eta": sessionParams.mirostatEta,
+                          "num_ctx": sessionParams.numCtx,
+                          "num_predict": sessionParams.numPredict,
+                          "num_keep": sessionParams.numKeep,
+                          "num_batch": sessionParams.numBatch,
+                          "seed": sessionParams.seed,
+                          "penalize_newline": sessionParams.penalizeNewline,
+                          "use_mmap": sessionParams.useMmap,
+                          "use_mlock": sessionParams.useMlock
+                      ]
+                      if sessionParams.numThread > 0 {
+                          optionsDict["num_thread"] = sessionParams.numThread
+                      }
+                      if sessionParams.numGpu >= 0 {
+                          optionsDict["num_gpu"] = sessionParams.numGpu
+                      }
+
+                      let stops = sessionParams.stopSequencesCSV
+                          .components(separatedBy: ",")
+                          .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                          .filter { !$0.isEmpty }
+                      if !stops.isEmpty {
+                          optionsDict["stop"] = stops
+                      }
+
+                      var payload: [String: Any] = [
+                          "model": model.name,
+                          "messages": apiMessages,
+                          "stream": true,
+                          "keep_alive": "\(sessionParams.keepAliveMinutes)m",
+                          "options": optionsDict
+                      ]
+
+                      if modelSupportsThinking {
+                          if isSummaryTurn && !supervisor.useThinkingForSummary {
+                              payload["think"] = false
+                          } else if continuingAssistantNodeID != nil && !initialAnswer.isEmpty {
+                              payload["think"] = false
+                          } else if model.thinkingProfile.supportsEffortLevels && shouldThink, let effortStr = sessionParams.thinkingMode.effortDirective {
+                              payload["think"] = effortStr
+                          } else {
+                              payload["think"] = shouldThink
+                          }
+                      }
+
+                      if sessionParams.enforceJSONMode {
+                          payload["format"] = "json"
+                      }
+
+                      request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+                      var receivedFirstChunk = false
+                      var thinkingTokenCounter = 0
+                      var answerTokenCounter = 0
+                      var evalTokenCountFromEngine: Int? = nil
+                      var promptEvalCountFromEngine: Int? = nil
+                      var evalDurationFromEngineNs: Int64? = nil
+
+                      do {
+                          let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                          guard let http = response as? HTTPURLResponse else {
+                              throw URLError(.badServerResponse)
+                          }
+
+                          if http.statusCode == 400 && payload["think"] != nil {
+                              payload.removeValue(forKey: "think")
+                              request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+                              let (retryBytes, retryResp) = try await URLSession.shared.bytes(for: request)
+                              if let retryHttp = retryResp as? HTTPURLResponse {
+                                  if retryHttp.statusCode == 200 {
+                                      for try await line in retryBytes.lines {
+                                          if Task.isCancelled { break }
+                                          await processStreamLine(
+                                              line,
+                                              neededInitialLoad: neededInitialLoad,
+                                              startWall: startWall,
+                                              priorAnswerTokens: priorAnswerTokens,
+                                              priorThinkingTokens: priorThinkingTokens,
+                                              receivedFirstChunk: &receivedFirstChunk,
+                                              thinkingTokenCounter: &thinkingTokenCounter,
+                                              answerTokenCounter: &answerTokenCounter,
+                                              evalTokenCountFromEngine: &evalTokenCountFromEngine,
+                                              promptEvalCountFromEngine: &promptEvalCountFromEngine,
+                                              evalDurationFromEngineNs: &evalDurationFromEngineNs,
+                                              parser: parser,
+                                              assistantID: assistantID,
+                                              targetSessionID: targetSessionID
+                                          )
+                                      }
+                                  } else {
+                                      var retryErr = ""
+                                      for try await line in retryBytes.lines { retryErr += line }
+                                      self.recordStreamError(
+                                          assistantID: assistantID,
+                                          targetSessionID: targetSessionID,
+                                          message: "Ollama HTTP \(retryHttp.statusCode): \(retryErr)"
+                                      )
+                                  }
+                              }
+                          } else if http.statusCode != 200 {
+                              var errorBody = ""
+                              for try await line in bytes.lines { errorBody += line }
+                              self.recordStreamError(
+                                  assistantID: assistantID,
+                                  targetSessionID: targetSessionID,
+                                  message: "Ollama HTTP \(http.statusCode): \(errorBody)"
+                              )
+                          } else {
+                              for try await line in bytes.lines {
+                                  if Task.isCancelled { break }
+                                  await processStreamLine(
+                                      line,
+                                      neededInitialLoad: neededInitialLoad,
+                                      startWall: startWall,
+                                      priorAnswerTokens: priorAnswerTokens,
+                                      priorThinkingTokens: priorThinkingTokens,
+                                      receivedFirstChunk: &receivedFirstChunk,
+                                      thinkingTokenCounter: &thinkingTokenCounter,
+                                      answerTokenCounter: &answerTokenCounter,
+                                      evalTokenCountFromEngine: &evalTokenCountFromEngine,
+                                      promptEvalCountFromEngine: &promptEvalCountFromEngine,
+                                      evalDurationFromEngineNs: &evalDurationFromEngineNs,
+                                      parser: parser,
+                                      assistantID: assistantID,
+                                      targetSessionID: targetSessionID
+                                  )
+                              }
+                          }
+                      } catch {
+                          if !Task.isCancelled {
+                              self.recordStreamError(
+                                  assistantID: assistantID,
+                                  targetSessionID: targetSessionID,
+                                  message: "Connection to local Ollama failed (\(error.localizedDescription)). Ensure Ollama is running."
+                              )
+                          }
+                      }
+
+                      if !Task.isCancelled {
+                          parser.flushPendingBufferWithoutLosingState(markComplete: true)
+
+                          let hasThoughtOnly = !parser.accumulatedThinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                                               parser.accumulatedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                                               continuingAssistantNodeID == nil
+                          if hasThoughtOnly {
+                              var followUpMessages = apiMessages
+                              followUpMessages.append([
+                                  "role": "assistant",
+                                  "content": "<think>\n\(parser.accumulatedThinking)\n</think>"
+                              ])
+                              followUpMessages.append([
+                                  "role": "user",
+                                  "content": "Now provide the complete final response based on your reasoning above."
+                              ])
+                              var followUpPayload = payload
+                              followUpPayload["messages"] = followUpMessages
+                              followUpPayload["think"] = false
+                              request.httpBody = try? JSONSerialization.data(withJSONObject: followUpPayload)
+
+                              if let (followBytes, followResp) = try? await URLSession.shared.bytes(for: request),
+                                 let followHttp = followResp as? HTTPURLResponse, followHttp.statusCode == 200 {
+                                  for try await line in followBytes.lines {
+                                      if Task.isCancelled { break }
+                                      await processStreamLine(
+                                          line,
+                                          neededInitialLoad: false,
+                                          startWall: startWall,
+                                          priorAnswerTokens: priorAnswerTokens,
+                                          priorThinkingTokens: priorThinkingTokens,
+                                          receivedFirstChunk: &receivedFirstChunk,
+                                          thinkingTokenCounter: &thinkingTokenCounter,
+                                          answerTokenCounter: &answerTokenCounter,
+                                          evalTokenCountFromEngine: &evalTokenCountFromEngine,
+                                          promptEvalCountFromEngine: &promptEvalCountFromEngine,
+                                          evalDurationFromEngineNs: &evalDurationFromEngineNs,
+                                          parser: parser,
+                                          assistantID: assistantID,
+                                          targetSessionID: targetSessionID
+                                      )
+                                  }
+                                  parser.flushPendingBufferWithoutLosingState(markComplete: true)
+                              }
+                          }
+
+                          let totalElapsed = max(0.1, Date().timeIntervalSince(startWall))
+                          var finalTPS = self.liveTokensPerSec
+                          if let ec = evalTokenCountFromEngine, let ed = evalDurationFromEngineNs, ed > 0 {
+                              finalTPS = Double(ec) / (Double(ed) / 1_000_000_000.0)
+                          }
+
+                          let finalThinkingTok = priorThinkingTokens + max(thinkingTokenCounter, parser.accumulatedThinking.isEmpty ? 0 : max(1, parser.accumulatedThinking.count / 4))
+                          let finalAnswerTok: Int
+                          if parser.accumulatedThinking.isEmpty, let ec = evalTokenCountFromEngine, ec > 0 {
+                              finalAnswerTok = priorAnswerTokens + ec
+                          } else if let ec = evalTokenCountFromEngine, ec > thinkingTokenCounter && thinkingTokenCounter > 0 {
+                              finalAnswerTok = priorAnswerTokens + max(1, ec - thinkingTokenCounter)
+                          } else {
+                              finalAnswerTok = priorAnswerTokens + max(answerTokenCounter, max(1, parser.accumulatedAnswer.count / 4))
+                          }
+
+                          self.updateStreamingNode(
+                              assistantID: assistantID,
+                              targetSessionID: targetSessionID,
+                              parser: parser,
+                              tps: finalTPS,
+                              elapsed: totalElapsed,
+                              answerTokens: finalAnswerTok,
+                              thinkingTokens: finalThinkingTok,
+                              promptTokens: promptEvalCountFromEngine ?? 0,
+                              isFinal: true
+                          )
+                          self.extractArtifactsFromCompletedMessage(assistantID: assistantID, targetSessionID: targetSessionID)
+                          self.isStreamingGeneration = false
+                          self.isLoadingModelWeights = false
+                          self.loadingModelName = ""
+                          self.loadingModelInternalID = ""
+                          self.streamingSessionID = nil
+                          self.streamingNodeID = nil
+                          self.activeStreamParser = nil
+                          self.saveAllState()
+                          await self.pollOllamaRunningProcesses()
+                          self.recalculateHardwareTelemetry()
+                      }
+                  }
+              }
+
+              private func processStreamLine(
+                  _ line: String,
+                  neededInitialLoad: Bool,
+                  startWall: Date,
+                  priorAnswerTokens: Int,
+                  priorThinkingTokens: Int,
+                  receivedFirstChunk: inout Bool,
+                  thinkingTokenCounter: inout Int,
+                  answerTokenCounter: inout Int,
+                  evalTokenCountFromEngine: inout Int?,
+                  promptEvalCountFromEngine: inout Int?,
+                  evalDurationFromEngineNs: inout Int64?,
+                  parser: StatefulThinkingStreamParser,
+                  assistantID: UUID,
+                  targetSessionID: UUID
+              ) async {
+                  guard !Task.isCancelled,
+                        let data = line.data(using: .utf8),
+                        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+
+                  if let errStr = json["error"] as? String {
+                      self.recordStreamError(assistantID: assistantID, targetSessionID: targetSessionID, message: errStr)
+                      return
+                  }
+
+                  if !receivedFirstChunk {
+                      receivedFirstChunk = true
+                      withAnimation(.easeInOut(duration: 0.30)) {
+                          self.isLoadingModelWeights = false
+                          self.loadingModelName = ""
+                          self.loadingModelInternalID = ""
+                          self.isConfirmingModelLoadCancel = false
+                      }
+                      if neededInitialLoad {
+                          self.triggerModelLoadCompletionFlicker()
+                      }
+                      await self.pollOllamaRunningProcesses()
+                  }
+
+                  if let msg = json["message"] as? [String: Any] {
+                      if let explicitThink = msg["thinking"] as? String, !explicitThink.isEmpty {
+                          parser.ingestExplicitThinkingDelta(explicitThink)
+                          thinkingTokenCounter += 1
+                      }
+                      if let contentChunk = msg["content"] as? String, !contentChunk.isEmpty {
+                          let prevAnsLen = parser.accumulatedAnswer.count
+                          parser.ingestContentChunk(contentChunk)
+                          if parser.accumulatedAnswer.count > prevAnsLen {
+                              answerTokenCounter += 1
+                          } else {
+                              thinkingTokenCounter += 1
+                          }
+                      }
+                  }
+
+                  if let promptEval = json["prompt_eval_count"] as? Int {
+                      promptEvalCountFromEngine = promptEval
+                  }
+                  if let evalCount = json["eval_count"] as? Int {
+                      evalTokenCountFromEngine = evalCount
+                  }
+                  if let evalDur = json["eval_duration"] as? Int64 {
+                      evalDurationFromEngineNs = evalDur
+                  }
+
+                  let totalGeneratedSoFar = thinkingTokenCounter + answerTokenCounter
+                  let isDoneChunk = (json["done"] as? Bool) == true
+                  let now = Date()
+                  guard isDoneChunk || totalGeneratedSoFar <= 2 || now.timeIntervalSince(self.lastStreamUIUpdateTime) >= 0.036 else {
+                      return
+                  }
+                  self.lastStreamUIUpdateTime = now
+
+                  let elapsed = max(0.05, now.timeIntervalSince(startWall))
+                  var tps = Double(max(1, totalGeneratedSoFar)) / elapsed
+                  if let ec = evalTokenCountFromEngine, let ed = evalDurationFromEngineNs, ed > 0 {
+                      tps = Double(ec) / (Double(ed) / 1_000_000_000.0)
+                  }
+
+                  let currentThinkTok = priorThinkingTokens + max(thinkingTokenCounter, parser.accumulatedThinking.count / 4)
+                  let currentAnswerTok = priorAnswerTokens + max(answerTokenCounter, parser.accumulatedAnswer.count / 4)
+
+                  self.updateStreamingNode(
+                      assistantID: assistantID,
+                      targetSessionID: targetSessionID,
+                      parser: parser,
+                      tps: tps,
+                      elapsed: elapsed,
+                      answerTokens: currentAnswerTok,
+                      thinkingTokens: currentThinkTok,
+                      promptTokens: promptEvalCountFromEngine ?? 0,
+                      isFinal: false
+                  )
+              }
+
+              private func recordStreamError(assistantID: UUID, targetSessionID: UUID, message: String) {
+                  humanReadableErrorBanner = message
+                  guard let sIdx = sessions.firstIndex(where: { $0.id == targetSessionID }),
+                        var node = sessions[sIdx].nodes[assistantID] else { return }
+                  node.isThinkingComplete = true
+                  node.errorNote = message
+                  sessions[sIdx].nodes[assistantID] = node
+              }
+
+              private func updateStreamingNode(
+                  assistantID: UUID,
+                  targetSessionID: UUID,
+                  parser: StatefulThinkingStreamParser,
+                  tps: Double,
+                  elapsed: Double,
+                  answerTokens: Int,
+                  thinkingTokens: Int,
+                  promptTokens: Int,
+                  isFinal: Bool
+              ) {
+                  guard let sIdx = sessions.firstIndex(where: { $0.id == targetSessionID }),
+                        var node = sessions[sIdx].nodes[assistantID] else { return }
+
+                  node.thinkingTrace = parser.accumulatedThinking
+                  node.content = parser.accumulatedAnswer
+                  node.isThinkingComplete = !parser.isCurrentlyThinking || isFinal
+
+                  self.liveTokensPerSec = tps
+                  self.liveTotalTokens = answerTokens
+                  self.liveThinkingTokens = thinkingTokens
+                  self.liveElapsedSeconds = elapsed
+
+                  let prevPrompt = node.metrics?.promptEvalTokens ?? 0
+                  node.metrics = GenerationMetrics(
+                      tokensPerSecond: tps,
+                      totalGenerationDurationSec: elapsed,
+                      thinkingDurationSec: parser.thinkingDurationSeconds,
+                      totalTokens: answerTokens,
+                      thinkingTokens: thinkingTokens,
+                      promptEvalTokens: promptTokens > 0 ? promptTokens : prevPrompt
+                  )
+                  sessions[sIdx].nodes[assistantID] = node
+
+                  let combinedCount = answerTokens + thinkingTokens
+                  if !isScrolledAwayFromBottom && !isAutoScrollPaused && !isFinal && combinedCount % 4 == 0 {
+                      streamScrollPulse &+= 1
+                  }
+              }
+
+              public func stopActiveGeneration() {
+                  if let parser = activeStreamParser {
+                      parser.flushPendingBufferWithoutLosingState(markComplete: false)
+                  }
+                  if let sID = streamingSessionID,
+                     let nID = streamingNodeID,
+                     let sIdx = sessions.firstIndex(where: { $0.id == sID }),
+                     var node = sessions[sIdx].nodes[nID] {
+                      if let parser = activeStreamParser {
+                          node.thinkingTrace = parser.accumulatedThinking
+                          node.content = parser.accumulatedAnswer
+                          node.wasStoppedMidThinking = parser.isCurrentlyThinking || (node.content.isEmpty && !node.thinkingTrace.isEmpty)
+                      }
+                      node.isThinkingComplete = true
+                      node.wasStoppedMidStream = true
+                      if !node.thinkingTrace.isEmpty && node.content.isEmpty {
+                          node.isThinkingExpanded = true
+                      }
+                      sessions[sIdx].nodes[nID] = node
+                  }
+                  streamingTask?.cancel()
+                  streamingTask = nil
+                  activeStreamParser = nil
+                  isStreamingGeneration = false
+                  isLoadingModelWeights = false
+                  loadingModelName = ""
+                  loadingModelInternalID = ""
+                  isConfirmingModelLoadCancel = false
+                  streamingSessionID = nil
+                  streamingNodeID = nil
+                  saveAllState()
+              }
+
+              private func extractArtifactsFromCompletedMessage(assistantID: UUID, targetSessionID: UUID) {
+                  guard let sIdx = sessions.firstIndex(where: { $0.id == targetSessionID }),
+                        let node = sessions[sIdx].nodes[assistantID] else { return }
+
+                  let pattern = "```([a-zA-Z0-9_-]*)\\n([\\s\\S]*?)```"
+                  guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
+                  let nsContent = node.content as NSString
+                  let matches = regex.matches(in: node.content, range: NSRange(location: 0, length: nsContent.length))
+
+                  for (idx, match) in matches.enumerated() where match.numberOfRanges >= 3 {
+                      let lang = nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                      let code = nsContent.substring(with: match.range(at: 2))
+                      guard code.count > 32 else { continue }
+
+                      let title = "\(lang.isEmpty ? "Code" : lang.capitalized) #\(idx + 1)"
+                      if !sessions[sIdx].artifacts.contains(where: { $0.content == code }) {
+                          let artifact = WorkspaceArtifact(
+                              title: title,
+                              language: lang.isEmpty ? "swift" : lang,
+                              content: code,
+                              sourceMessageID: assistantID
+                          )
+                          sessions[sIdx].artifacts.append(artifact)
+                          selectedArtifactID = artifact.id
+                      }
+                  }
+              }
+
+              // MARK: - Session, Workspace, Preset & Recoverable Archive Lifecycle
+              @Published public var isNewWorkspaceSheetPresented: Bool = false
+              @Published public var isNewPresetSheetPresented: Bool = false
+
+              public func createNewSession(folderID: UUID? = nil) {
+                  let defaultModel = activeModelDescriptor?.name ?? availableModels.first?.name ?? ""
+                  let inheritedParams = preferredParameters(forModelName: defaultModel)
+                  let newSession = ConversationSession(
+                      title: "New Folio",
+                      folderID: folderID,
+                      selectedModelName: defaultModel,
+                      parameters: inheritedParams
+                  )
+                  sessions.insert(newSession, at: 0)
+                  selectedSessionID = newSession.id
+                  isArchiveViewActive = false
+                  isSettingsViewActive = false
+                  saveAllState()
+              }
+
+              public func createWorkspace(name: String) {
+                  let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !cleaned.isEmpty else { return }
+                  let folder = ProjectFolder(name: cleaned, isExpanded: true)
+                  folders.append(folder)
+                  saveAllState()
+              }
+
+              public func renameWorkspace(folderID: UUID, newName: String) {
+                  let cleaned = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !cleaned.isEmpty, let idx = folders.firstIndex(where: { $0.id == folderID }) else { return }
+                  folders[idx].name = cleaned
+                  saveAllState()
+              }
+
+              public func deleteWorkspace(folderID: UUID) {
+                  for idx in sessions.indices where sessions[idx].folderID == folderID {
+                      sessions[idx].folderID = nil
+                  }
+                  folders.removeAll { $0.id == folderID }
+                  saveAllState()
+              }
+
+              public func createPreset(name: String) {
+                  let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !cleaned.isEmpty else { return }
+                  let currentParams = activeSession?.parameters ?? .balanced
+                  let currentPrompt = activeSession?.systemPrompt ?? ""
+                  let preset = ParameterPreset(
+                      name: cleaned,
+                      summary: String(format: "%@ · Temp %.2f · %dk ctx · KV %@", currentParams.thinkingMode.rawValue, currentParams.temperature, currentParams.numCtx / 1024, currentParams.kvCacheQuant.rawValue.uppercased()),
+                      parameters: currentParams,
+                      systemPrompt: currentPrompt
+                  )
+                  presets.append(preset)
+                  saveAllState()
+              }
+
+              public func updatePresetWithCurrentSettings(_ presetID: UUID) {
+                  guard let pIdx = presets.firstIndex(where: { $0.id == presetID }),
+                        let session = activeSession else { return }
+                  presets[pIdx].parameters = session.parameters
+                  presets[pIdx].systemPrompt = session.systemPrompt
+                  presets[pIdx].summary = String(format: "%@ · Temp %.2f · %dk ctx · KV %@", session.parameters.thinkingMode.rawValue, session.parameters.temperature, session.parameters.numCtx / 1024, session.parameters.kvCacheQuant.rawValue.uppercased())
+                  saveAllState()
+              }
+
+              public func deletePreset(_ presetID: UUID) {
+                  presets.removeAll { $0.id == presetID }
+                  saveAllState()
+              }
+
+              public func moveSessionToTrash(_ sessionID: UUID) {
+                  if streamingSessionID == sessionID {
+                      stopActiveGeneration()
+                  }
+                  guard let idx = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
+                  sessions[idx].isTrashed = true
+                  sessions[idx].trashedAt = Date()
+                  if selectedSessionID == sessionID {
+                      selectedSessionID = sessions.first(where: { !$0.isTrashed })?.id
+                  }
+                  saveAllState()
+              }
+
+              public func restoreSessionFromTrash(_ sessionID: UUID) {
+                  guard let idx = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
+                  sessions[idx].isTrashed = false
+                  sessions[idx].trashedAt = nil
+                  selectedSessionID = sessionID
+                  isArchiveViewActive = false
+                  saveAllState()
+              }
+
+              public func permanentlyDeleteSession(_ sessionID: UUID) {
+                  if streamingSessionID == sessionID {
+                      stopActiveGeneration()
+                  }
+                  sessions.removeAll { $0.id == sessionID }
+                  if selectedSessionID == sessionID {
+                      selectedSessionID = sessions.first(where: { !$0.isTrashed })?.id
+                  }
+                  saveAllState()
+              }
+
+              public func emptyTrashPermanently() {
+                  sessions.removeAll { $0.isTrashed }
+                  saveAllState()
+              }
+
+              public func duplicateSession(_ sessionID: UUID) {
+                  guard let orig = sessions.first(where: { $0.id == sessionID }) else { return }
+                  var copy = orig
+                  copy.id = UUID()
+                  copy.title = "\(orig.title) Copy"
+                  copy.isTrashed = false
+                  copy.createdAt = Date()
+                  copy.updatedAt = Date()
+                  sessions.insert(copy, at: 0)
+                  selectedSessionID = copy.id
+                  saveAllState()
+              }
+
+              public func commitInlineRename(sessionID: UUID, proposedName: String) {
+                  guard let idx = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
+                  sessions[idx].title = ConversationSession.sanitizeTitle(proposedName)
+                  saveAllState()
+              }
+
+              public func adjustActiveFontSize(delta: Double) {
+                  if isWindowFullscreen {
+                      typography.fullscreenBaseFontSize = min(22.0, max(13.0, typography.fullscreenBaseFontSize + delta))
+                  } else {
+                      typography.windowedBaseFontSize = min(19.0, max(11.5, typography.windowedBaseFontSize + delta))
+                  }
+              }
+
+              public func saveAllState() {
+                  vault.scheduleDebouncedSave(sessions: sessions, folders: folders, presets: presets, personas: slashPersonas)
+              }
+
+              public func startModelDownload(reference: String) {
+                  let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+                  guard !trimmed.isEmpty,
+                        let url = URL(string: "\(supervisor.normalizedEndpoint)/api/pull") else { return }
+
+                  let taskID = UUID()
+                  let newTask = RegistryDownloadTask(
+                      id: taskID,
+                      modelReference: trimmed,
+                      statusText: "Starting download…",
+                      completedBytes: 0,
+                      totalBytes: 1,
+                      isCompleted: false
+                  )
+                  downloadTasks.insert(newTask, at: 0)
+
+                  let handle = Task {
+                      var req = URLRequest(url: url)
+                      req.httpMethod = "POST"
+                      req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                      req.timeoutInterval = 3600.0
+                      req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": trimmed, "stream": true])
+
+                      do {
+                          let (bytes, _) = try await URLSession.shared.bytes(for: req)
+                          for try await line in bytes.lines {
+                              if Task.isCancelled { break }
+                              guard let data = line.data(using: .utf8),
+                                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                              let status = (json["status"] as? String) ?? "Downloading…"
+                              let completed = (json["completed"] as? Int64) ?? 0
+                              let total = (json["total"] as? Int64) ?? 1
+
+                              if let tIdx = self.downloadTasks.firstIndex(where: { $0.id == taskID }) {
+                                  self.downloadTasks[tIdx].statusText = status
+                                  if total > 0 {
+                                      self.downloadTasks[tIdx].completedBytes = completed
+                                      self.downloadTasks[tIdx].totalBytes = total
+                                  }
+                                  if status == "success" {
+                                      self.downloadTasks[tIdx].isCompleted = true
+                                  }
+                              }
+                          }
+                          if !Task.isCancelled {
+                              await self.refreshLocalEngineModels()
+                          }
+                      } catch {
+                          if !Task.isCancelled, let tIdx = self.downloadTasks.firstIndex(where: { $0.id == taskID }) {
+                              self.downloadTasks[tIdx].statusText = "Failed: \(error.localizedDescription)"
+                          }
+                      }
+                      self.downloadTaskHandles.removeValue(forKey: taskID)
+                  }
+                  downloadTaskHandles[taskID] = handle
+              }
+
+              public func cancelModelDownload(_ taskID: UUID) {
+                  downloadTaskHandles[taskID]?.cancel()
+                  downloadTaskHandles.removeValue(forKey: taskID)
+                  downloadTasks.removeAll { $0.id == taskID }
+              }
+
+              private func loadSavedSessionsAndWorkspaces() {
+                  if let (savedSessions, savedFolders, savedPresets, savedPersonas) = vault.loadSavedState() {
+                      self.sessions = savedSessions
+                      self.folders = savedFolders
+                      self.presets = savedPresets
+                      self.slashPersonas = savedPersonas
+                      if let savedIDStr = UserDefaults.standard.string(forKey: "BlackMotifSelectedSessionIDV1"),
+                         let savedUUID = UUID(uuidString: savedIDStr),
+                         self.sessions.contains(where: { $0.id == savedUUID && !$0.isTrashed }) {
+                          self.selectedSessionID = savedUUID
+                      } else {
+                          self.selectedSessionID = self.sessions.first(where: { !$0.isTrashed })?.id
+                      }
+                      restoreDraftFromSelectedSession()
+                  }
+              }
+          }
+          EOF
+
+      - name: Generate Monochrome Architectural Primitives, Dotted Spec Leaders, Flat Sliders & Cached Markdown (GlassAndTelemetryComponents.swift)
+        run: |
+          cat << 'EOF' > BlackMotif/Sources/BlackMotif/Components/GlassAndTelemetryComponents.swift
+          import SwiftUI
+          import AppKit
+
+          extension TypographyConfiguration {
+              public var baseFontSize: Double {
+                  get { windowedBaseFontSize }
+                  set { windowedBaseFontSize = newValue }
+              }
+          }
+
+          // MARK: - Crisp 0.5pt Architectural Grid Hairline
+          public struct HairlineDivider: View {
+              public var axis: Axis = .horizontal
+              public let tokens: MotifTokens
+              @Environment(\.displayScale) private var displayScale
+
+              private var thickness: CGFloat { 1.0 / max(1.0, displayScale) }
+
+              public init(axis: Axis = .horizontal, tokens: MotifTokens) {
+                  self.axis = axis
+                  self.tokens = tokens
+              }
+
+              public var body: some View {
+                  if axis == .horizontal {
+                      Rectangle().fill(tokens.hairline).frame(height: thickness)
+                  } else {
+                      Rectangle().fill(tokens.hairline).frame(width: thickness)
+                  }
+              }
+          }
+
+          // MARK: - Micro-Embossed Paper & Graphite Key Button (`3pt` Chamfered Geometry)
+          public struct ArchitecturalKeyButton: View {
+              public let title: String
+              public var systemImage: String? = nil
+              public var isPrimaryStamp: Bool = false
+              public var isDisabled: Bool = false
+              public let tokens: MotifTokens
+              public let typo: TypographyConfiguration
+              public let action: () -> Void
+
+              @State private var isHovered: Bool = false
+
+              public init(
+                  _ title: String,
+                  systemImage: String? = nil,
+                  isPrimaryStamp: Bool = false,
+                  isDisabled: Bool = false,
+                  tokens: MotifTokens,
+                  typo: TypographyConfiguration,
+                  action: @escaping () -> Void
+              ) {
+                  self.title = title
+                  self.systemImage = systemImage
+                  self.isPrimaryStamp = isPrimaryStamp
+                  self.isDisabled = isDisabled
+                  self.tokens = tokens
+                  self.typo = typo
+                  self.action = action
+              }
+
+              public var body: some View {
+                  Button(action: action) {
+                      HStack(spacing: 5) {
+                          if let icon = systemImage {
+                              Image(systemName: icon)
+                                  .font(.system(size: 10, weight: .semibold))
+                          }
+                          Text(title)
+                              .font(typo.sans(size: 11, weight: isPrimaryStamp ? .semibold : .medium))
+                      }
+                      .foregroundColor(
+                          isDisabled
+                              ? tokens.mutedText
+                              : (isPrimaryStamp ? tokens.accentForeground : tokens.primaryText)
+                      )
+                      .padding(.horizontal, 10)
+                      .frame(height: 25)
+                      .background(
+                          RoundedRectangle(cornerRadius: 3, style: .continuous)
+                              .fill(
+                                  isDisabled
+                                      ? tokens.elevatedSurface.opacity(0.45)
+                                      : (isPrimaryStamp
+                                         ? tokens.accentAction.opacity(isHovered ? 0.90 : 1.0)
+                                         : (isHovered ? tokens.selectionPill : tokens.canvasBackground))
+                              )
+                      )
+                      .overlay(
+                          RoundedRectangle(cornerRadius: 3, style: .continuous)
+                              .strokeBorder(
+                                  isPrimaryStamp
+                                      ? Color.clear
+                                      : (isHovered ? tokens.strongBorder : tokens.hairline),
+                                  lineWidth: 0.75
+                              )
+                      )
+                      .shadow(
+                          color: Color.black.opacity(tokens.isEffectivelyDark ? 0.22 : 0.04),
+                          radius: 1.5,
+                          y: 1
+                      )
+                  }
+                  .buttonStyle(.plain)
+                  .disabled(isDisabled)
+                  .onHover { hovering in
+                      withAnimation(.easeOut(duration: 0.12)) {
+                          isHovered = hovering
+                      }
+                  }
+              }
+          }
+
+          // MARK: - Dotted Watch-Spec Leader Row (`FREE HEADROOM .......... 4.82 GB`)
+          public struct DottedSpecLeaderRow: View {
+              public let label: String
+              public let value: String
+              public let tokens: MotifTokens
+              public let typo: TypographyConfiguration
+
+              public init(_ label: String, value: String, tokens: MotifTokens, typo: TypographyConfiguration) {
+                  self.label = label
+                  self.value = value
+                  self.tokens = tokens
+                  self.typo = typo
+              }
+
+              public var body: some View {
+                  HStack(alignment: .firstTextBaseline, spacing: 6) {
+                      Text(label)
+                          .font(typo.sans(size: 11, weight: .regular))
+                          .foregroundColor(tokens.secondaryText)
+                          .lineLimit(1)
+
+                      GeometryReader { geo in
+                          Path { path in
+                              let y = geo.size.height - 3
+                              path.move(to: CGPoint(x: 0, y: y))
+                              path.addLine(to: CGPoint(x: geo.size.width, y: y))
+                          }
+                          .stroke(
+                              tokens.strongBorder.opacity(0.55),
+                              style: StrokeStyle(lineWidth: 0.8, dash: [1.2, 3.0])
+                          )
+                      }
+                      .frame(height: 11)
+
+                      Text(value)
+                          .font(typo.mono(size: 10.5, weight: .medium))
+                          .foregroundColor(tokens.primaryText)
+                          .lineLimit(1)
+                  }
+              }
+          }
+
+          // MARK: - Custom Flat-Track Monochrome Slider (`1px` Rule + `7x11pt` Square Graphite Thumb)
+          public struct ArchitecturalSlider: View {
+              public let title: String
+              public let subtitle: String
+              @Binding public var value: Double
+              public let defaultValue: Double
+              public let range: ClosedRange<Double>
+              public let tokens: MotifTokens
+              public let typo: TypographyConfiguration
+
+              @State private var isHovering: Bool = false
+
+              private var isModified: Bool {
+                  abs(value - defaultValue) > 0.005
+              }
+
+              private var normalizedFraction: CGFloat {
+                  let span = max(0.0001, range.upperBound - range.lowerBound)
+                  return CGFloat(min(1.0, max(0.0, (value - range.lowerBound) / span)))
+              }
+
+              public var body: some View {
+                  VStack(alignment: .leading, spacing: 6) {
+                      HStack(alignment: .center, spacing: 6) {
+                          Text(title)
+                              .font(typo.sans(size: 11.5, weight: .medium))
+                              .foregroundColor(tokens.primaryText)
+
+                          Spacer()
+
+                          Text(String(format: "%.2f", value))
+                              .font(typo.mono(size: 10.5, weight: .medium))
+                              .foregroundColor(tokens.primaryText)
+
+                          Button {
+                              value = defaultValue
+                          } label: {
+                              Image(systemName: "arrow.counterclockwise")
+                                  .font(.system(size: 9.5, weight: .semibold))
+                                  .foregroundColor(isModified ? tokens.primaryText : tokens.mutedText.opacity(0.35))
+                                  .frame(width: 16, height: 16)
+                                  .background(
+                                      RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                          .fill(isModified ? tokens.elevatedSurface : Color.clear)
+                                  )
+                          }
+                          .buttonStyle(.plain)
+                          .disabled(!isModified)
+                          .help("\(subtitle) · Click to reset to \(String(format: "%.2f", defaultValue))")
+                      }
+
+                      GeometryReader { geo in
+                          let trackWidth = max(1, geo.size.width)
+                          let thumbW: CGFloat = 7
+                          let thumbH: CGFloat = 12
+                          let usableWidth = max(1, trackWidth - thumbW)
+                          let thumbX = usableWidth * normalizedFraction
+
+                          ZStack(alignment: .leading) {
+                              // Base 1px graphite track
+                              Rectangle()
+                                  .fill(tokens.hairline)
+                                  .frame(height: 1.2)
+
+                              // Active filled graphite segment
+                              Rectangle()
+                                  .fill(tokens.accentAction.opacity(0.75))
+                                  .frame(width: thumbX + (thumbW * 0.5), height: 1.5)
+
+                              // Precision rectangular drafting thumb
+                              RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                                  .fill(tokens.accentAction)
+                                  .frame(width: thumbW, height: thumbH)
+                                  .overlay(
+                                      RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                                          .strokeBorder(tokens.canvasBackground, lineWidth: 0.75)
+                                  )
+                                  .offset(x: thumbX)
+                          }
+                          .frame(height: 16)
+                          .contentShape(Rectangle())
+                          .gesture(
+                              DragGesture(minimumDistance: 0)
+                                  .onChanged { gesture in
+                                      let pct = min(1.0, max(0.0, gesture.location.x / trackWidth))
+                                      let rawVal = range.lowerBound + Double(pct) * (range.upperBound - range.lowerBound)
+                                      value = (rawVal * 100.0).rounded() / 100.0
+                                  }
+                          )
+                      }
+                      .frame(height: 16)
+                  }
+                  .onHover { isHovering = $0 }
+                  .help(subtitle)
+              }
+          }
+
+          public struct ArchitecturalIntStepperRow: View {
+              public let title: String
+              public let subtitle: String
+              @Binding public var value: Int
+              public let defaultValue: Int
+              public let range: ClosedRange<Int>
+              public let step: Int
+              public let tokens: MotifTokens
+              public let typo: TypographyConfiguration
+
+              private var isModified: Bool {
+                  value != defaultValue
+              }
+
+              public var body: some View {
+                  HStack(alignment: .center, spacing: 6) {
+                      Text(title)
+                          .font(typo.sans(size: 11))
+                          .foregroundColor(tokens.secondaryText)
+                          .lineLimit(1)
+
+                      Spacer()
+
+                      HStack(spacing: 0) {
+                          Button {
+                              value = max(range.lowerBound, value - step)
+                          } label: {
+                              Text("−")
+                                  .font(typo.mono(size: 11, weight: .semibold))
+                                  .frame(width: 20, height: 20)
+                                  .contentShape(Rectangle())
+                          }
+                          .buttonStyle(.plain)
+
+                          HairlineDivider(axis: .vertical, tokens: tokens)
+                              .frame(height: 14)
+
+                          Text("\(value)")
+                              .font(typo.mono(size: 10.5, weight: .medium))
+                              .frame(minWidth: 42)
+                              .multilineTextAlignment(.center)
+
+                          HairlineDivider(axis: .vertical, tokens: tokens)
+                              .frame(height: 14)
+
+                          Button {
+                              value = min(range.upperBound, value + step)
+                          } label: {
+                              Text("+")
+                                  .font(typo.mono(size: 11, weight: .semibold))
+                                  .frame(width: 20, height: 20)
+                                  .contentShape(Rectangle())
+                          }
+                          .buttonStyle(.plain)
+                      }
+                      .foregroundColor(tokens.primaryText)
+                      .background(
+                          RoundedRectangle(cornerRadius: 3, style: .continuous)
+                              .fill(tokens.canvasBackground)
+                      )
+                      .overlay(
+                          RoundedRectangle(cornerRadius: 3, style: .continuous)
+                              .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                      )
+
+                      Button {
+                          value = defaultValue
+                      } label: {
+                          Image(systemName: "arrow.counterclockwise")
+                              .font(.system(size: 9.5, weight: .semibold))
+                              .foregroundColor(isModified ? tokens.primaryText : tokens.mutedText.opacity(0.3))
+                              .frame(width: 16, height: 16)
+                      }
+                      .buttonStyle(.plain)
+                      .disabled(!isModified)
+                  }
+                  .help("\(subtitle) (Default: \(defaultValue))")
+              }
+          }
+
+          // MARK: - Enforces Theme-Matched Overlay Scrollbars on Enclosing SwiftUI ScrollViews
+          public struct OverlayScrollConfigurator: NSViewRepresentable {
+              public let isDark: Bool
+
+              public init(isDark: Bool) {
+                  self.isDark = isDark
+              }
+
+              public func makeNSView(context: Context) -> ScrollConfigNSView {
+                  let v = ScrollConfigNSView()
+                  v.isDark = isDark
+                  return v
+              }
+
+              public func updateNSView(_ nsView: ScrollConfigNSView, context: Context) {
+                  nsView.isDark = isDark
+                  nsView.applyOverlayStyle()
+              }
+
+              public final class ScrollConfigNSView: NSView {
+                  public var isDark: Bool = false
+
+                  public override func viewDidMoveToWindow() {
+                      super.viewDidMoveToWindow()
+                      DispatchQueue.main.async { [weak self] in
+                          self?.applyOverlayStyle()
+                      }
+                  }
+
+                  public func applyOverlayStyle() {
+                      var candidate: NSView? = self
+                      while let cur = candidate {
+                          if let sv = cur as? NSScrollView {
+                              sv.scrollerStyle = .overlay
+                              sv.autohidesScrollers = true
+                              sv.drawsBackground = false
+                              sv.appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
+                              break
+                          }
+                          candidate = cur.superview
+                      }
+                  }
+              }
+          }
+
+          // MARK: - Viewport-Proportional AppKit NSScrollView Bottom Detector + Overlay Scroller Styling
+          public struct ScrollViewBottomObserver: NSViewRepresentable {
+              @Binding public var isScrolledAwayFromBottom: Bool
+              public let isDark: Bool
+
+              public init(isScrolledAwayFromBottom: Binding<Bool>, isDark: Bool = false) {
+                  self._isScrolledAwayFromBottom = isScrolledAwayFromBottom
+                  self.isDark = isDark
+              }
+
+              public func makeNSView(context: Context) -> ObserverNSView {
+                  let view = ObserverNSView()
+                  view.isDark = isDark
+                  view.onScrolledAwayChange = { away in
+                      if self.isScrolledAwayFromBottom != away {
+                          self.isScrolledAwayFromBottom = away
+                      }
+                  }
+                  return view
+              }
+
+              public func updateNSView(_ nsView: ObserverNSView, context: Context) {
+                  nsView.isDark = isDark
+                  nsView.onScrolledAwayChange = { away in
+                      if self.isScrolledAwayFromBottom != away {
+                          self.isScrolledAwayFromBottom = away
+                      }
+                  }
+                  nsView.syncScrollerAppearance()
+                  nsView.evaluateScrollPosition()
+              }
+
+              public final class ObserverNSView: NSView {
+                  public var onScrolledAwayChange: ((Bool) -> Void)?
+                  public var isDark: Bool = false
+                  private var observers: [NSObjectProtocol] = []
+                  private weak var trackedScrollView: NSScrollView?
+
+                  public override func viewDidMoveToWindow() {
+                      super.viewDidMoveToWindow()
+                      DispatchQueue.main.async { [weak self] in
+                          self?.attachToEnclosingScrollView()
+                      }
+                  }
+
+                  public func syncScrollerAppearance() {
+                      guard let sv = trackedScrollView else { return }
+                      if sv.scrollerStyle != .overlay {
+                          sv.scrollerStyle = .overlay
+                      }
+                      sv.autohidesScrollers = true
+                      sv.drawsBackground = false
+                      let targetApp = NSAppearance(named: isDark ? .darkAqua : .aqua)
+                      if sv.appearance != targetApp {
+                          sv.appearance = targetApp
+                      }
+                  }
+
+                  private func attachToEnclosingScrollView() {
+                      observers.forEach { NotificationCenter.default.removeObserver($0) }
+                      observers.removeAll()
+
+                      var candidate: NSView? = self
+                      var foundScroll: NSScrollView? = nil
+                      while let cur = candidate {
+                          if let sv = cur as? NSScrollView {
+                              foundScroll = sv
+                              break
+                          }
+                          candidate = cur.superview
+                      }
+                      guard let scrollView = foundScroll else { return }
+                      trackedScrollView = scrollView
+                      syncScrollerAppearance()
+                      scrollView.contentView.postsBoundsChangedNotifications = true
+                      scrollView.contentView.postsFrameChangedNotifications = true
+                      scrollView.documentView?.postsFrameChangedNotifications = true
+
+                      let center = NotificationCenter.default
+                      let bObs = center.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main) { [weak self] _ in
+                          self?.evaluateScrollPosition()
+                      }
+                      let fObs = center.addObserver(forName: NSView.frameDidChangeNotification, object: scrollView.contentView, queue: .main) { [weak self] _ in
+                          self?.evaluateScrollPosition()
+                      }
+                      let dObs = center.addObserver(forName: NSView.frameDidChangeNotification, object: scrollView.documentView, queue: .main) { [weak self] _ in
+                          self?.evaluateScrollPosition()
+                      }
+                      let fsObs = center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: nil, queue: .main) { [weak self] _ in
+                          DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                              self?.evaluateScrollPosition()
+                          }
+                      }
+                      observers = [bObs, fObs, dObs, fsObs]
+                      evaluateScrollPosition()
+                  }
+
+                  public func evaluateScrollPosition() {
+                      guard let sv = trackedScrollView, let docView = sv.documentView else { return }
+                      let isFullscreen = sv.window?.styleMask.contains(.fullScreen) == true
+                      let clipBounds = sv.contentView.bounds
+                      let viewportH = max(320.0, clipBounds.height)
+                      let docHeight = docView.frame.height
+
+                      let effectiveDocHeight = max(0.0, docHeight - 150.0)
+                      let minRequiredOverflow = isFullscreen ? max(900.0, viewportH * 1.25) : max(620.0, viewportH * 1.05)
+
+                      if (effectiveDocHeight - viewportH) < minRequiredOverflow {
+                          onScrolledAwayChange?(false)
+                          return
+                      }
+
+                      let distanceAboveBottom = max(0.0, effectiveDocHeight - clipBounds.maxY)
+                      let showThreshold: CGFloat = isFullscreen
+                          ? max(1100.0, viewportH * 1.30)
+                          : max(680.0, viewportH * 1.10)
+                      let hideThreshold: CGFloat = isFullscreen ? 360.0 : 240.0
+
+                      if distanceAboveBottom <= hideThreshold {
+                          onScrolledAwayChange?(false)
+                      } else if distanceAboveBottom >= showThreshold {
+                          onScrolledAwayChange?(true)
+                      }
+                  }
+
+                  deinit {
+                      observers.forEach { NotificationCenter.default.removeObserver($0) }
+                  }
+              }
+          }
+
+          // MARK: - Architectural Rectilinear "Jump to Latest" Key (`3pt` Chamfered Muted Carbon Stamp)
+          public struct ArchitecturalJumpToLatestButton: View {
+              public let tokens: MotifTokens
+              public let typo: TypographyConfiguration
+              public let action: () -> Void
+              @State private var isHovered: Bool = false
+
+              public var body: some View {
+                  Button(action: action) {
+                      HStack(spacing: 5) {
+                          Image(systemName: "arrow.down")
+                              .font(.system(size: 10.5, weight: .bold))
+                          Text("LATEST")
+                              .font(typo.mono(size: 9.5, weight: .semibold))
+                              .tracking(0.8)
+                      }
+                      .foregroundColor(tokens.accentForeground)
+                      .padding(.horizontal, 11)
+                      .frame(height: 26)
+                      .background(
+                          RoundedRectangle(cornerRadius: 3, style: .continuous)
+                              .fill(tokens.accentAction.opacity(isHovered ? 0.92 : 1.0))
+                      )
+                      .overlay(
+                          RoundedRectangle(cornerRadius: 3, style: .continuous)
+                              .strokeBorder(tokens.strongBorder.opacity(0.45), lineWidth: 0.75)
+                      )
+                      .shadow(
+                          color: Color.black.opacity(tokens.isEffectivelyDark ? 0.30 : 0.10),
+                          radius: 5,
+                          y: 2
+                      )
+                  }
+                  .buttonStyle(.plain)
+                  .onHover { hovering in
+                      withAnimation(.easeOut(duration: 0.12)) {
+                          isHovered = hovering
+                      }
+                  }
+                  .help("Scroll to latest entry")
+              }
+          }
+
+          // MARK: - Code-Safe LaTeX Normalizer
+          public enum LaTeXAndSymbolNormalizer {
+              public static func normalizeProse(_ input: String) -> String {
+                  guard input.contains("$") || input.contains("\\") else { return input }
+                  var s = input
+
+                  s = s.replacingOccurrences(of: "$$", with: "")
+                  s = s.replacingOccurrences(of: "\\[", with: "")
+                  s = s.replacingOccurrences(of: "\\]", with: "")
+                  s = s.replacingOccurrences(of: "\\(", with: "")
+                  s = s.replacingOccurrences(of: "\\)", with: "")
+
+                  let wrappers = [
+                      "\\\\textbf\\{([^\\}]*)\\}": "**$1**",
+                      "\\\\textit\\{([^\\}]*)\\}": "*$1*",
+                      "\\\\text\\{([^\\}]*)\\}": "$1",
+                      "\\\\mathrm\\{([^\\}]*)\\}": "$1",
+                      "\\\\mathbf\\{([^\\}]*)\\}": "**$1**",
+                      "\\\\sqrt\\{([^\\}]*)\\}": "√($1)",
+                      "\\\\frac\\{([^\\}]*)\\}\\{([^\\}]*)\\}": "($1/$2)"
+                  ]
+                  for (pattern, template) in wrappers {
+                      if let regex = try? NSRegularExpression(pattern: pattern) {
+                          s = regex.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: template)
+                      }
+                  }
+
+                  if s.contains("$"), let inlineMathRegex = try? NSRegularExpression(pattern: "\\$(?!\\s)([^$\\n]+?)(?<!\\s)\\$") {
+                      let ns = s as NSString
+                      let matches = inlineMathRegex.matches(in: s, range: NSRange(location: 0, length: ns.length))
+                      if !matches.isEmpty {
+                          var rebuilt = s
+                          for match in matches.reversed() where match.numberOfRanges >= 2 {
+                              let fullRange = Range(match.range(at: 0), in: rebuilt)!
+                              let innerRange = Range(match.range(at: 1), in: rebuilt)!
+                              var mathInner = String(rebuilt[innerRange])
+                              let mathSubSup: [(String, String)] = [
+                                  ("^2", "²"), ("^3", "³"), ("^n", "ⁿ"),
+                                  ("_0", "₀"), ("_1", "₁"), ("_2", "₂"), ("_i", "ᵢ"), ("_n", "ₙ")
+                              ]
+                              for (k, v) in mathSubSup {
+                                  mathInner = mathInner.replacingOccurrences(of: k, with: v)
+                              }
+                              rebuilt.replaceSubrange(fullRange, with: mathInner)
+                          }
+                          s = rebuilt
+                      }
+                  }
+
+                  let replacements: [(String, String)] = [
+                      ("\\times", "×"), ("\\div", "÷"), ("\\pm", "±"), ("\\mp", "∓"),
+                      ("\\cdot", "·"), ("\\approx", "≈"), ("\\neq", "≠"), ("\\ne", "≠"),
+                      ("\\leq", "≤"), ("\\le", "≤"), ("\\geq", "≥"), ("\\ge", "≥"),
+                      ("\\rightarrow", "→"), ("\\to", "→"), ("\\leftarrow", "←"),
+                      ("\\Rightarrow", "⇒"), ("\\Leftarrow", "⇐"), ("\\leftrightarrow", "↔"),
+                      ("\\infty", "∞"), ("\\partial", "∂"), ("\\nabla", "∇"),
+                      ("\\forall", "∀"), ("\\exists", "∃"), ("\\in", "∈"), ("\\notin", "∉"),
+                      ("\\subset", "⊂"), ("\\subseteq", "⊆"), ("\\cup", "∪"), ("\\cap", "∩"),
+                      ("\\sum", "∑"), ("\\prod", "∏"), ("\\int", "∫"),
+                      ("\\alpha", "α"), ("\\beta", "β"), ("\\gamma", "γ"), ("\\delta", "δ"),
+                      ("\\epsilon", "ε"), ("\\zeta", "ζ"), ("\\eta", "η"), ("\\theta", "θ"),
+                      ("\\lambda", "λ"), ("\\mu", "μ"), ("\\pi", "π"), ("\\rho", "ρ"),
+                      ("\\sigma", "σ"), ("\\tau", "τ"), ("\\phi", "φ"), ("\\chi", "χ"),
+                      ("\\psi", "ψ"), ("\\omega", "ω"), ("\\Delta", "Δ"), ("\\Sigma", "Σ"),
+                      ("\\Omega", "Ω"), ("\\Gamma", "Γ"), ("\\Lambda", "Λ"), ("\\Theta", "Θ")
+                  ]
+                  for (latex, unicode) in replacements {
+                      s = s.replacingOccurrences(of: latex, with: unicode)
+                  }
+                  return s
+              }
+          }
+
+          // MARK: - Cached Markdown Block Parser & Editorial Renderer
+          public enum MarkdownBlockKind: Equatable {
+              case paragraph(String)
+              case heading(Int, String)
+              case bulletItem(String)
+              case numberedItem(String, String)
+              case blockquote(String)
+              case horizontalRule
+              case codeBlock(String, String)
+          }
+
+          public struct MarkdownBlock: Equatable {
+              public let kind: MarkdownBlockKind
+          }
+
+          public final class MarkdownParseCache {
+              public nonisolated(unsafe) static let shared = MarkdownParseCache()
+              private let lock = NSLock()
+              private var blockCache: [Int: [MarkdownBlock]] = [:]
+
+              public func blocks(for raw: String, isStreaming: Bool, builder: () -> [MarkdownBlock]) -> [MarkdownBlock] {
+                  if isStreaming {
+                      return builder()
+                  }
+                  let key = raw.hashValue
+                  lock.lock()
+                  if let cached = blockCache[key] {
+                      lock.unlock()
+                      return cached
+                  }
+                  lock.unlock()
+
+                  let computed = builder()
+                  lock.lock()
+                  if blockCache.count > 400 {
+                      blockCache.removeAll(keepingCapacity: true)
+                  }
+                  blockCache[key] = computed
+                  lock.unlock()
+                  return computed
+              }
+          }
+
+          public struct StreamSafeMarkdownView: View {
+              public let rawMarkdown: String
+              public let isStreaming: Bool
+              public let effectiveFontSize: CGFloat
+              public let tokens: MotifTokens
+              public let typo: TypographyConfiguration
+              public var useMonospaceBody: Bool = false
+              public var overrideTextColor: Color? = nil
+              public let onOpenCodeInInspector: (String, String) -> Void
+
+              public var body: some View {
+                  let blocks = MarkdownParseCache.shared.blocks(for: rawMarkdown, isStreaming: isStreaming) {
+                      parseBlocks(from: sanitizeIncompleteStreamMarkers(rawMarkdown, isStreaming: isStreaming))
+                  }
+                  VStack(alignment: .leading, spacing: useMonospaceBody ? 8 : 13) {
+                      ForEach(blocks.indices, id: \.self) { idx in
+                          let block = blocks[idx]
+                          switch block.kind {
+                          case .codeBlock(let lang, let code):
+                              MotifCodeBlockView(
+                                  language: lang,
+                                  code: code,
+                                  tokens: tokens,
+                                  typo: typo,
+                                  onOpenInArtifactPane: { onOpenCodeInInspector(lang, code) }
+                              )
+                              .padding(.vertical, 3)
+
+                          case .heading(let level, let text):
+                              let size: CGFloat = {
+                                  switch level {
+                                  case 1: return effectiveFontSize + 4.5
+                                  case 2: return effectiveFontSize + 2.6
+                                  case 3: return effectiveFontSize + 1.2
+                                  default: return effectiveFontSize + 0.4
+                                  }
+                              }()
+                              renderInlineRichText(text, baseFontSize: size, isHeading: true)
+                                  .padding(.top, level <= 3 ? 4 : 2)
+
+                          case .bulletItem(let text):
+                              HStack(alignment: .firstTextBaseline, spacing: 9) {
+                                  Text("—")
+                                      .font(typo.mono(size: max(10.5, effectiveFontSize - 1.5), weight: .regular))
+                                      .foregroundColor(overrideTextColor ?? tokens.mutedText)
+                                      .frame(width: 14, alignment: .trailing)
+                                  renderInlineRichText(text, baseFontSize: effectiveFontSize, isHeading: false)
+                              }
+
+                          case .numberedItem(let numberStr, let text):
+                              HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                  Text(numberStr)
+                                      .font(typo.mono(size: max(10.5, effectiveFontSize - 1.5), weight: .medium))
+                                      .foregroundColor(overrideTextColor ?? tokens.secondaryText)
+                                      .frame(width: 22, alignment: .trailing)
+                                  renderInlineRichText(text, baseFontSize: effectiveFontSize, isHeading: false)
+                              }
+
+                          case .blockquote(let text):
+                              HStack(spacing: 12) {
+                                  Rectangle()
+                                      .fill(tokens.strongBorder)
+                                      .frame(width: 1.5)
+                                  renderInlineRichText(text, baseFontSize: effectiveFontSize, isHeading: false)
+                                      .foregroundColor(overrideTextColor ?? tokens.secondaryText)
+                              }
+                              .padding(.vertical, 2)
+
+                          case .horizontalRule:
+                              HairlineDivider(tokens: tokens)
+                                  .padding(.vertical, 5)
+
+                          case .paragraph(let text):
+                              renderInlineRichText(text, baseFontSize: effectiveFontSize, isHeading: false)
+                          }
+                      }
+                  }
+              }
+
+              private func sanitizeIncompleteStreamMarkers(_ input: String, isStreaming: Bool) -> String {
+                  guard isStreaming else { return input }
+                  var result = input
+                  let boldCount = result.components(separatedBy: "**").count - 1
+                  if boldCount % 2 != 0, let lastRange = result.range(of: "**", options: .backwards) {
+                      result.removeSubrange(lastRange)
+                  }
+                  let fenceCount = result.components(separatedBy: "```").count - 1
+                  if fenceCount % 2 == 0 {
+                      let inlineBackticks = result.components(separatedBy: "`").count - 1
+                      if inlineBackticks % 2 != 0, let lastTick = result.range(of: "`", options: .backwards) {
+                          result.removeSubrange(lastTick)
+                      }
+                  }
+                  return result
+              }
+
+              private func matchHeading(_ trimmed: String) -> (level: Int, text: String)? {
+                  guard trimmed.hasPrefix("#") else { return nil }
+                  var count = 0
+                  for ch in trimmed {
+                      if ch == "#" { count += 1 }
+                      else { break }
+                  }
+                  guard count >= 1 && count <= 6 else { return nil }
+                  let remainder = String(trimmed.dropFirst(count))
+                  guard remainder.isEmpty || remainder.first == " " || remainder.first == "\t" else { return nil }
+                  var cleanedText = remainder.trimmingCharacters(in: .whitespaces)
+                  while cleanedText.hasSuffix("#") {
+                      cleanedText.removeLast()
+                  }
+                  cleanedText = cleanedText.trimmingCharacters(in: .whitespaces)
+                  guard !cleanedText.isEmpty else { return nil }
+                  return (count, cleanedText)
+              }
+
+              private func parseBlocks(from raw: String) -> [MarkdownBlock] {
+                  var blocks: [MarkdownBlock] = []
+                  let segments = raw.components(separatedBy: "```")
+
+                  for (segIdx, segment) in segments.enumerated() {
+                      if segIdx % 2 == 1 {
+                          var lines = segment.components(separatedBy: .newlines)
+                          let firstLine = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                          if !lines.isEmpty { lines.removeFirst() }
+                          let codeBody = lines.joined(separator: "\n")
+                          blocks.append(MarkdownBlock(kind: .codeBlock(firstLine, codeBody)))
+                      } else {
+                          let lines = segment.components(separatedBy: .newlines)
+                          var currentParagraph: [String] = []
+
+                          func flushParagraph() {
+                              let joined = currentParagraph.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                              if !joined.isEmpty {
+                                  blocks.append(MarkdownBlock(kind: .paragraph(joined)))
+                              }
+                              currentParagraph.removeAll()
+                          }
+
+                          for line in lines {
+                              let trimmed = line.trimmingCharacters(in: .whitespaces)
+                              if trimmed.isEmpty {
+                                  flushParagraph()
+                              } else if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+                                  flushParagraph()
+                                  blocks.append(MarkdownBlock(kind: .horizontalRule))
+                              } else if let headingMatch = matchHeading(trimmed) {
+                                  flushParagraph()
+                                  blocks.append(MarkdownBlock(kind: .heading(headingMatch.level, headingMatch.text)))
+                              } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("• ") || trimmed.hasPrefix("+ ") {
+                                  flushParagraph()
+                                  blocks.append(MarkdownBlock(kind: .bulletItem(String(trimmed.dropFirst(2)))))
+                              } else if trimmed.hasPrefix("> ") || trimmed == ">" {
+                                  flushParagraph()
+                                  let quoteBody = trimmed.count > 2 ? String(trimmed.dropFirst(2)) : ""
+                                  if !quoteBody.isEmpty {
+                                      blocks.append(MarkdownBlock(kind: .blockquote(quoteBody)))
+                                  }
+                              } else if let numberedMatch = matchNumberedList(trimmed) {
+                                  flushParagraph()
+                                  blocks.append(MarkdownBlock(kind: .numberedItem(numberedMatch.number, numberedMatch.rest)))
+                              } else {
+                                  currentParagraph.append(line)
+                              }
+                          }
+                          flushParagraph()
+                      }
+                  }
+                  return blocks
+              }
+
+              private func matchNumberedList(_ line: String) -> (number: String, rest: String)? {
+                  let dotIdx = line.firstIndex(of: ".") ?? line.firstIndex(of: ")")
+                  guard let sepIdx = dotIdx else { return nil }
+                  let prefix = String(line[..<sepIdx])
+                  guard !prefix.isEmpty, prefix.allSatisfy({ $0.isNumber }) else { return nil }
+                  let afterSep = line.index(after: sepIdx)
+                  guard afterSep < line.endIndex, line[afterSep] == " " else { return nil }
+                  let body = String(line[line.index(after: afterSep)...])
+                  return ("\(prefix).", body)
+              }
+
+              @ViewBuilder
+              private func renderInlineRichText(_ text: String, baseFontSize: CGFloat, isHeading: Bool) -> some View {
+                  Text(buildAttributedInline(text, baseFontSize: baseFontSize, isHeading: isHeading))
+                      .lineSpacing(CGFloat(baseFontSize * (useMonospaceBody ? 0.36 : (typo.lineSpacingMultiplier - 1.0))))
+                      .textSelection(.enabled)
+                      .fixedSize(horizontal: false, vertical: true)
+              }
+
+              private func buildAttributedInline(_ raw: String, baseFontSize: CGFloat, isHeading: Bool) -> AttributedString {
+                  var output = AttributedString()
+                  let parts = raw.components(separatedBy: "`")
+                  let targetColor = overrideTextColor ?? tokens.primaryText
+
+                  for (idx, part) in parts.enumerated() {
+                      if idx % 2 == 1 {
+                          var codeAttr = AttributedString(" \(part) ")
+                          codeAttr.font = typo.mono(size: max(10.5, baseFontSize - 1.4), weight: .medium)
+                          codeAttr.foregroundColor = targetColor
+                          codeAttr.backgroundColor = tokens.elevatedSurface
+                          output.append(codeAttr)
+                      } else {
+                          let normalizedProse = LaTeXAndSymbolNormalizer.normalizeProse(part)
+                          var mdAttr = (try? AttributedString(markdown: normalizedProse, options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(normalizedProse)
+                          mdAttr.foregroundColor = targetColor
+
+                          for run in mdAttr.runs {
+                              let range = run.range
+                              let isBold = run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true || isHeading
+                              let isItalic = run.inlinePresentationIntent?.contains(.emphasized) == true
+                              if useMonospaceBody {
+                                  var f = typo.mono(size: baseFontSize, weight: isBold ? .bold : .regular)
+                                  if isItalic { f = f.italic() }
+                                  mdAttr[range].font = f
+                              } else if isHeading {
+                                  var f = typo.display(size: baseFontSize, weight: .semibold)
+                                  if isItalic { f = f.italic() }
+                                  mdAttr[range].font = f
+                              } else {
+                                  var f = typo.sans(size: baseFontSize, weight: isBold ? .semibold : .regular)
+                                  if isItalic { f = f.italic() }
+                                  mdAttr[range].font = f
+                              }
+                          }
+                          output.append(mdAttr)
+                      }
+                  }
+                  return output
+              }
+          }
+
+          // MARK: - Architectural Recessed Code Block (`3pt` Chamfered Well)
+          public struct MotifCodeBlockView: View {
+              public let language: String
+              public let code: String
+              public let tokens: MotifTokens
+              public let typo: TypographyConfiguration
+              public let onOpenInArtifactPane: () -> Void
+
+              @State private var isCopied: Bool = false
+              @State private var softWrapEnabled: Bool = false
+
+              private var lines: [String] {
+                  code.trimmingCharacters(in: .newlines).components(separatedBy: .newlines)
+              }
+
+              public var body: some View {
+                  VStack(alignment: .leading, spacing: 0) {
+                      HStack(spacing: 10) {
+                          Text(language.isEmpty ? "SPEC // CODE" : "CODE // \(language.uppercased())")
+                              .font(typo.mono(size: 10, weight: .semibold))
+                              .tracking(0.6)
+                              .foregroundColor(tokens.secondaryText)
+
+                          Text("\(lines.count) \(lines.count == 1 ? "line" : "lines")")
+                              .font(typo.mono(size: 10))
+                              .foregroundColor(tokens.mutedText)
+
+                          Spacer()
+
+                          Button {
+                              softWrapEnabled.toggle()
+                          } label: {
+                              Text(softWrapEnabled ? "UNWRAP" : "WRAP")
+                                  .font(typo.mono(size: 9.5, weight: .medium))
+                                  .tracking(0.5)
+                                  .foregroundColor(tokens.secondaryText)
+                          }
+                          .buttonStyle(.plain)
+
+                          Button(action: onOpenInArtifactPane) {
+                              Text("LEDGER")
+                                  .font(typo.mono(size: 9.5, weight: .medium))
+                                  .tracking(0.5)
+                                  .foregroundColor(tokens.secondaryText)
+                          }
+                          .buttonStyle(.plain)
+
+                          Button(action: copyCodeToClipboard) {
+                              Text(isCopied ? "COPIED" : "COPY")
+                                  .font(typo.mono(size: 9.5, weight: .semibold))
+                                  .tracking(0.5)
+                                  .foregroundColor(isCopied ? tokens.accentForeground : tokens.primaryText)
+                                  .padding(.horizontal, 8)
+                                  .padding(.vertical, 3)
+                                  .background(
+                                      RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                          .fill(isCopied ? tokens.accentAction : tokens.canvasBackground)
+                                  )
+                                  .overlay(
+                                      RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                          .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                  )
+                          }
+                          .buttonStyle(.plain)
+                      }
+                      .padding(.horizontal, 12)
+                      .padding(.vertical, 7)
+                      .background(tokens.elevatedSurface)
+
+                      HairlineDivider(tokens: tokens)
+
+                      HStack(alignment: .top, spacing: 0) {
+                          VStack(alignment: .trailing, spacing: 4) {
+                              ForEach(lines.indices, id: \.self) { idx in
+                                  Text(String(format: "%02d", idx + 1))
+                                      .font(typo.mono(size: 11))
+                                      .foregroundColor(tokens.mutedText)
+                              }
+                          }
+                          .frame(minWidth: 34, alignment: .trailing)
+                          .padding(.vertical, 10)
+                          .padding(.trailing, 9)
+                          .padding(.leading, 8)
+                          .background(tokens.sidebarBackground)
+
+                          HairlineDivider(axis: .vertical, tokens: tokens)
+
+                          if softWrapEnabled {
+                              VStack(alignment: .leading, spacing: 4) {
+                                  ForEach(lines.indices, id: \.self) { idx in
+                                      Text(lines[idx].isEmpty ? " " : lines[idx])
+                                          .font(typo.mono(size: 12))
+                                          .foregroundColor(tokens.primaryText)
+                                          .textSelection(.enabled)
+                                          .fixedSize(horizontal: false, vertical: true)
+                                  }
+                              }
+                              .padding(.vertical, 10)
+                              .padding(.horizontal, 14)
+                              .frame(maxWidth: .infinity, alignment: .leading)
+                          } else {
+                              ScrollView(.horizontal, showsIndicators: false) {
+                                  VStack(alignment: .leading, spacing: 4) {
+                                      ForEach(lines.indices, id: \.self) { idx in
+                                          Text(lines[idx].isEmpty ? " " : lines[idx])
+                                              .font(typo.mono(size: 12))
+                                              .foregroundColor(tokens.primaryText)
+                                              .textSelection(.enabled)
+                                      }
+                                  }
+                                  .padding(.vertical, 10)
+                                  .padding(.leading, 14)
+                                  .padding(.trailing, 20)
+                              }
+                          }
+                      }
+                      .background(tokens.elevatedSurface.opacity(0.45))
+                  }
+                  .clipShape(RoundedRectangle(cornerRadius: 3.5, style: .continuous))
+                  .overlay(
+                      RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                          .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                  )
+              }
+
+              private func copyCodeToClipboard() {
+                  NSPasteboard.general.clearContents()
+                  NSPasteboard.general.setString(code, forType: .string)
+                  withAnimation(.easeInOut(duration: 0.14)) { isCopied = true }
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                      withAnimation(.easeInOut(duration: 0.14)) { isCopied = false }
+                  }
+              }
+          }
+
+          // MARK: - Theme-Matched Multi-Line Text Editor (`MotifStyledTextEditor`)
+          public struct MotifStyledTextEditor: NSViewRepresentable {
+              @Binding public var text: String
+              public let font: NSFont
+              public let tokens: MotifTokens
+
+              public init(text: Binding<String>, font: NSFont, tokens: MotifTokens) {
+                  self._text = text
+                  self.font = font
+                  self.tokens = tokens
+              }
+
+              public func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+              public func makeNSView(context: Context) -> NSScrollView {
+                  let scrollView = NSScrollView()
+                  scrollView.drawsBackground = false
+                  scrollView.hasVerticalScroller = true
+                  scrollView.hasHorizontalScroller = false
+                  scrollView.autohidesScrollers = true
+                  scrollView.scrollerStyle = .overlay
+                  scrollView.borderType = .noBorder
+                  scrollView.appearance = NSAppearance(named: tokens.isEffectivelyDark ? .darkAqua : .aqua)
+
+                  let textView = NSTextView()
+                  textView.delegate = context.coordinator
+                  textView.drawsBackground = false
+                  textView.isRichText = false
+                  textView.allowsUndo = true
+                  textView.isAutomaticQuoteSubstitutionEnabled = false
+                  textView.isAutomaticDashSubstitutionEnabled = false
+                  textView.font = font
+                  textView.textColor = NSColor(tokens.primaryText)
+                  textView.insertionPointColor = NSColor(tokens.primaryText)
+                  textView.textContainerInset = NSSize(width: 4, height: 6)
+                  textView.isVerticallyResizable = true
+                  textView.isHorizontallyResizable = false
+                  textView.autoresizingMask = [.width]
+                  textView.textContainer?.widthTracksTextView = true
+
+                  scrollView.documentView = textView
+                  return scrollView
+              }
+
+              public func updateNSView(_ scrollView: NSScrollView, context: Context) {
+                  context.coordinator.parent = self
+                  scrollView.scrollerStyle = .overlay
+                  scrollView.appearance = NSAppearance(named: tokens.isEffectivelyDark ? .darkAqua : .aqua)
+                  guard let textView = scrollView.documentView as? NSTextView else { return }
+                  if textView.string != text && !textView.hasMarkedText() {
+                      textView.string = text
+                  }
+                  if textView.font != font {
+                      textView.font = font
+                  }
+                  let targetColor = NSColor(tokens.primaryText)
+                  if textView.textColor != targetColor {
+                      textView.textColor = targetColor
+                      textView.insertionPointColor = targetColor
+                  }
+              }
+
+              public final class Coordinator: NSObject, NSTextViewDelegate {
+                  var parent: MotifStyledTextEditor
+                  init(_ parent: MotifStyledTextEditor) { self.parent = parent }
+
+                  public func textDidChange(_ notification: Notification) {
+                      guard let tv = notification.object as? NSTextView else { return }
+                      if !tv.hasMarkedText() {
+                          parent.text = tv.string
+                      }
+                  }
+              }
+          }
+
+          // MARK: - Zero-Flicker 3-Line Quantized NSTextView Bridge with Native Blinking Caret
+          public struct IMESafeComposerTextView: NSViewRepresentable {
+              @Binding public var text: String
+              @Binding public var isFocused: Bool
+              @Binding public var compactHeight: CGFloat
+              @Binding public var lineCount: Int
+              public let placeholder: String
+              public let tokens: MotifTokens
+              public let typo: TypographyConfiguration
+              public let fontSize: CGFloat
+              public let isSlashMenuVisible: Bool
+              public let onSend: () -> Void
+              public let onSlashMoveUp: () -> Void
+              public let onSlashMoveDown: () -> Void
+              public let onSlashConfirm: () -> Bool
+              public let onSlashDismiss: () -> Void
+              public let onLargePaste: (String) -> Void
+
+              public func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+              public func makeNSView(context: Context) -> NSScrollView {
+                  let scrollView = NSScrollView()
+                  scrollView.drawsBackground = false
+                  scrollView.hasVerticalScroller = false
+                  scrollView.hasHorizontalScroller = false
+                  scrollView.borderType = .noBorder
+
+                  let textView = ComposerNSTextView()
+                  textView.delegate = context.coordinator
+                  textView.coordinator = context.coordinator
+                  textView.drawsBackground = false
+                  textView.isRichText = false
+                  textView.isAutomaticQuoteSubstitutionEnabled = false
+                  textView.isAutomaticDashSubstitutionEnabled = false
+                  textView.isAutomaticTextReplacementEnabled = false
+                  textView.isAutomaticSpellingCorrectionEnabled = false
+                  textView.allowsUndo = true
+                  textView.font = typo.nsFont(size: fontSize)
+                  textView.textContainerInset = NSSize(width: 2, height: 4)
+                  textView.isVerticallyResizable = true
+                  textView.isHorizontallyResizable = false
+                  textView.autoresizingMask = [.width]
+                  textView.textContainer?.widthTracksTextView = true
+                  textView.textContainer?.lineFragmentPadding = 4
+
+                  scrollView.documentView = textView
+                  return scrollView
+              }
+
+              public func updateNSView(_ scrollView: NSScrollView, context: Context) {
+                  context.coordinator.parent = self
+                  guard let textView = scrollView.documentView as? ComposerNSTextView else { return }
+                  let textChangedExternally = (textView.string != text && !textView.hasMarkedText())
+                  if textChangedExternally {
+                      textView.string = text
+                      textView.needsDisplay = true
+                  }
+                  let targetFont = typo.nsFont(size: fontSize)
+                  if textView.font != targetFont {
+                      textView.font = targetFont
+                  }
+                  let targetTextColor = NSColor(tokens.primaryText)
+                  if textView.textColor != targetTextColor {
+                      textView.textColor = targetTextColor
+                      textView.insertionPointColor = targetTextColor
+                  }
+                  let targetPlaceholderColor = NSColor(tokens.mutedText)
+                  if textView.placeholderString != placeholder || textView.placeholderColor != targetPlaceholderColor {
+                      textView.placeholderString = placeholder
+                      textView.placeholderColor = targetPlaceholderColor
+                      if textView.string.isEmpty {
+                          textView.needsDisplay = true
+                      }
+                  }
+
+                  if textChangedExternally {
+                      context.coordinator.recalculateQuantizedMetrics(for: textView)
+                  }
+              }
+
+              public final class Coordinator: NSObject, NSTextViewDelegate {
+                  var parent: IMESafeComposerTextView
+                  private var lastMeasuredWidth: CGFloat = 0
+
+                  init(_ parent: IMESafeComposerTextView) { self.parent = parent }
+
+                  public func textDidBeginEditing(_ notification: Notification) { parent.isFocused = true }
+                  public func textDidEndEditing(_ notification: Notification) { parent.isFocused = false }
+
+                  public func textDidChange(_ notification: Notification) {
+                      guard let tv = notification.object as? NSTextView else { return }
+                      if !tv.hasMarkedText() {
+                          parent.text = tv.string
+                      }
+                      recalculateQuantizedMetrics(for: tv)
+                  }
+
+                  public func handleWidthChangeIfNeeded(for textView: NSTextView) {
+                      let currentW = textView.bounds.width
+                      guard abs(currentW - lastMeasuredWidth) > 6.0 else { return }
+                      lastMeasuredWidth = currentW
+                      recalculateQuantizedMetrics(for: textView)
+                  }
+
+                  public func recalculateQuantizedMetrics(for textView: NSTextView) {
+                      if textView.string.isEmpty {
+                          if parent.lineCount != 1 || parent.compactHeight != 28.0 {
+                              DispatchQueue.main.async {
+                                  self.parent.lineCount = 1
+                                  self.parent.compactHeight = 28.0
+                              }
+                          }
+                          return
+                      }
+
+                      guard let layoutManager = textView.layoutManager,
+                            let textContainer = textView.textContainer else { return }
+                      layoutManager.ensureLayout(for: textContainer)
+                      let usedHeight = layoutManager.usedRect(for: textContainer).height
+                      let singleLineH = max(18.0, (textView.font?.ascender ?? 13.0) - (textView.font?.descender ?? -4.0) + (textView.font?.leading ?? 2.0))
+                      let estimatedLines = max(1, Int(round(usedHeight / singleLineH)))
+
+                      let targetCompactHeight: CGFloat
+                      if estimatedLines <= 1 {
+                          targetCompactHeight = 28.0
+                      } else if estimatedLines == 2 {
+                          targetCompactHeight = 46.0
+                      } else {
+                          targetCompactHeight = 64.0
+                      }
+
+                      if parent.lineCount != estimatedLines || abs(parent.compactHeight - targetCompactHeight) > 0.5 {
+                          DispatchQueue.main.async {
+                              self.parent.lineCount = estimatedLines
+                              self.parent.compactHeight = targetCompactHeight
+                          }
+                      }
+                  }
+
+                  public func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+                      if textView.hasMarkedText() { return false }
+
+                      if parent.isSlashMenuVisible {
+                          if commandSelector == #selector(NSResponder.moveUp(_:)) {
+                              parent.onSlashMoveUp()
+                              return true
+                          }
+                          if commandSelector == #selector(NSResponder.moveDown(_:)) {
+                              parent.onSlashMoveDown()
+                              return true
+                          }
+                          if commandSelector == #selector(NSResponder.insertTab(_:)) {
+                              let ok = parent.onSlashConfirm()
+                              recalculateQuantizedMetrics(for: textView)
+                              return ok
+                          }
+                          if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                              parent.onSlashDismiss()
+                              return true
+                          }
+                      }
+
+                      if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                          let flags = NSApp.currentEvent?.modifierFlags ?? []
+                          if flags.contains(.shift) {
+                              textView.insertNewlineIgnoringFieldEditor(nil)
+                              recalculateQuantizedMetrics(for: textView)
+                              return true
+                          } else {
+                              if parent.isSlashMenuVisible && parent.onSlashConfirm() {
+                                  recalculateQuantizedMetrics(for: textView)
+                                  return true
+                              }
+                              parent.onSend()
+                              return true
+                          }
+                      }
+                      return false
+                  }
+              }
+          }
+
+          public final class ComposerNSTextView: NSTextView {
+              weak var coordinator: IMESafeComposerTextView.Coordinator?
+              var placeholderString: String = ""
+              var placeholderColor: NSColor = .secondaryLabelColor
+
+              public override var acceptsFirstResponder: Bool { true }
+
+              public override func mouseDown(with event: NSEvent) {
+                  window?.makeFirstResponder(self)
+                  super.mouseDown(with: event)
+                  updateInsertionPointStateAndRestartTimer(true)
+              }
+
+              public override func becomeFirstResponder() -> Bool {
+                  let ok = super.becomeFirstResponder()
+                  if ok {
+                      updateInsertionPointStateAndRestartTimer(true)
+                  }
+                  return ok
+              }
+
+              public override func setFrameSize(_ newSize: NSSize) {
+                  super.setFrameSize(newSize)
+                  coordinator?.handleWidthChangeIfNeeded(for: self)
+              }
+
+              public override func draw(_ dirtyRect: NSRect) {
+                  super.draw(dirtyRect)
+                  if string.isEmpty && !hasMarkedText() {
+                      let attrs: [NSAttributedString.Key: Any] = [
+                          .font: font ?? NSFont.systemFont(ofSize: 14),
+                          .foregroundColor: placeholderColor
+                      ]
+                      let rect = NSRect(x: 6, y: 4, width: bounds.width - 12, height: bounds.height - 6)
+                      (placeholderString as NSString).draw(in: rect, withAttributes: attrs)
+                  }
+              }
+
+              public override func paste(_ sender: Any?) {
+                  if let pasted = NSPasteboard.general.string(forType: .string),
+                     (pasted.count > 2400 || pasted.components(separatedBy: .newlines).count > 55) {
+                      coordinator?.parent.onLargePaste(pasted)
+                      return
+                  }
+                  super.pasteAsPlainText(sender)
+                  coordinator?.recalculateQuantizedMetrics(for: self)
+              }
+          }
+          EOF
+
+      - name: Generate Plane 1 Index Ledger with Split Archive/Settings Footer (SidebarNavigationView.swift)
+        run: |
+          cat << 'EOF' > BlackMotif/Sources/BlackMotif/Views/SidebarNavigationView.swift
+          import SwiftUI
+          import AppKit
+
+          public struct SidebarNavigationView: View {
+              @ObservedObject public var store: WorkstationStore
+              public let tokens: MotifTokens
+
+              @State private var renamingSessionID: UUID? = nil
+              @State private var renameDraft: String = ""
+              @FocusState private var isRenameFocused: Bool
+
+              @State private var renamingFolderID: UUID? = nil
+              @State private var folderRenameDraft: String = ""
+              @FocusState private var isFolderRenameFocused: Bool
+
+              private var typo: TypographyConfiguration { store.typography }
+
+              private var searchQuery: String {
+                  store.sidebarSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+              }
+
+              private var unfiledSessions: [ConversationSession] {
+                  store.sessions.filter { session in
+                      guard !session.isTrashed, session.folderID == nil else { return false }
+                      guard !searchQuery.isEmpty else { return true }
+                      return session.title.lowercased().contains(searchQuery)
+                  }
+              }
+
+              private var trashedSessions: [ConversationSession] {
+                  store.sessions.filter { $0.isTrashed }
+              }
+
+              public var body: some View {
+                  VStack(alignment: .leading, spacing: 0) {
+                      // Top Windowed Traffic-Light Clearance + Flush 40pt Grid Header Band
+                      if !store.isWindowFullscreen {
+                          Color.clear.frame(height: 26)
+                      }
+
+                      HStack(alignment: .center, spacing: 8) {
+                          Button {
+                              commitActiveRenameIfNeeded()
+                              store.isSidebarVisible = false
+                          } label: {
+                              Image(systemName: "sidebar.left")
+                                  .font(.system(size: 11, weight: .medium))
+                                  .foregroundColor(tokens.secondaryText)
+                                  .frame(width: 24, height: 24)
+                                  .background(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .fill(tokens.canvasBackground)
+                                  )
+                                  .overlay(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                  )
+                          }
+                          .buttonStyle(.plain)
+                          .help("Retract Index Ledger (⌘\(store.shortcuts.toggleSidebarKey.uppercased()))")
+
+                          Text("BLACKMOTIF")
+                              .font(typo.display(size: 12.5, weight: .semibold))
+                              .tracking(1.6)
+                              .foregroundColor(tokens.primaryText)
+                              .lineLimit(1)
+
+                          Spacer(minLength: 4)
+
+                          Button {
+                              commitActiveRenameIfNeeded()
+                              store.createNewSession(folderID: nil)
+                          } label: {
+                              Image(systemName: "plus")
+                                  .font(.system(size: 11.5, weight: .semibold))
+                                  .foregroundColor(tokens.primaryText)
+                                  .frame(width: 24, height: 24)
+                                  .background(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .fill(tokens.canvasBackground)
+                                  )
+                                  .overlay(
+                                      RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                          .strokeBorder(tokens.strongBorder, lineWidth: 0.75)
+                                  )
+                          }
+                          .buttonStyle(.plain)
+                          .help("New Folio (⌘\(store.shortcuts.newChatKey.uppercased()))")
+                      }
+                      .padding(.horizontal, 14)
+                      .frame(height: 40)
+
+                      HairlineDivider(tokens: tokens)
+
+                      // Flush Full-Width Search Strip Between Two Edge-to-Edge Hairlines
+                      HStack(spacing: 7) {
+                          Text("/")
+                              .font(typo.mono(size: 11, weight: .semibold))
+                              .foregroundColor(tokens.mutedText)
+
+                          TextField("Filter index…", text: $store.sidebarSearchQuery)
+                              .textFieldStyle(.plain)
+                              .font(typo.sans(size: 12))
+                              .foregroundColor(tokens.primaryText)
+
+                          if !store.sidebarSearchQuery.isEmpty {
+                              Button {
+                                  store.sidebarSearchQuery = ""
+                              } label: {
+                                  Text("ESC")
+                                      .font(typo.mono(size: 9, weight: .medium))
+                                      .foregroundColor(tokens.mutedText)
+                              }
+                              .buttonStyle(.plain)
+                          }
+                      }
+                      .padding(.horizontal, 14)
+                      .frame(height: 32)
+                      .background(tokens.canvasBackground.opacity(0.45))
+
+                      HairlineDivider(tokens: tokens)
+
+                      // Main Scrollable Ledger: Either Active Index OR Clean In-Place Archive View
+                      if store.isArchiveViewActive {
+                          archiveLedgerContent
+                      } else {
+                          activeIndexLedgerContent
+                      }
+
+                      Spacer(minLength: 0)
+
+                      HairlineDivider(tokens: tokens)
+
+                      // Bottom 36pt Symmetrical Split Footer (`ARCHIVE · N | SETTINGS`)
+                      HStack(spacing: 0) {
+                          Button {
+                              commitActiveRenameIfNeeded()
+                              withAnimation(.easeOut(duration: 0.14)) {
+                                  store.isArchiveViewActive.toggle()
+                              }
+                          } label: {
+                              HStack(spacing: 5) {
+                                  Text(store.isArchiveViewActive ? "← INDEX" : "ARCHIVE · \(trashedSessions.count)")
+                                      .font(typo.mono(size: 10, weight: .semibold))
+                                      .tracking(0.6)
+                                      .foregroundColor(store.isArchiveViewActive ? tokens.primaryText : tokens.secondaryText)
+                              }
+                              .frame(maxWidth: .infinity, maxHeight: .infinity)
+                              .background(store.isArchiveViewActive ? tokens.selectionPill : Color.clear)
+                              .contentShape(Rectangle())
+                          }
+                          .buttonStyle(.plain)
+
+                          HairlineDivider(axis: .vertical, tokens: tokens)
+                              .frame(height: 36)
+
+                          Button {
+                              commitActiveRenameIfNeeded()
+                              withAnimation(.easeOut(duration: 0.14)) {
+                                  store.isSettingsViewActive.toggle()
+                              }
+                          } label: {
+                              HStack(spacing: 5) {
+                                  Text("SETTINGS")
+                                      .font(typo.mono(size: 10, weight: .semibold))
+                                      .tracking(0.6)
+                                      .foregroundColor(store.isSettingsViewActive ? tokens.primaryText : tokens.secondaryText)
+                              }
+                              .frame(maxWidth: .infinity, maxHeight: .infinity)
+                              .background(store.isSettingsViewActive ? tokens.selectionPill : Color.clear)
+                              .contentShape(Rectangle())
+                          }
+                          .buttonStyle(.plain)
+                      }
+                      .frame(height: 36)
+                  }
+                  .background(tokens.sidebarBackground)
+                  .overlay(alignment: .trailing) {
+                      HairlineDivider(axis: .vertical, tokens: tokens)
+                          .ignoresSafeArea()
+                  }
+              }
+
+              // MARK: - Active Index Content
+              private var activeIndexLedgerContent: some View {
+                  ScrollView(.vertical, showsIndicators: false) {
+                      VStack(alignment: .leading, spacing: 18) {
+                          if !store.ftsSearchResults.isEmpty {
+                              VStack(alignment: .leading, spacing: 4) {
+                                  Text("PASSAGE MATCHES")
+                                      .font(typo.mono(size: 9.5, weight: .semibold))
+                                      .tracking(0.8)
+                                      .foregroundColor(tokens.mutedText)
+                                      .padding(.horizontal, 14)
+
+                                  ForEach(store.ftsSearchResults) { hit in
+                                      Button {
+                                          commitActiveRenameIfNeeded()
+                                          store.selectedSessionID = hit.sessionID
+                                          store.pendingScrollToMessageID = hit.messageID
+                                      } label: {
+                                          VStack(alignment: .leading, spacing: 2) {
+                                              Text(hit.sessionTitle)
+                                                  .font(typo.sans(size: 11.5, weight: .semibold))
+                                                  .foregroundColor(tokens.primaryText)
+                                                  .lineLimit(1)
+                                              Text(hit.snippetText)
+                                                  .font(typo.sans(size: 11))
+                                                  .foregroundColor(tokens.secondaryText)
+                                                  .lineLimit(2)
+                                          }
+                                          .padding(.horizontal, 10)
+                                          .padding(.vertical, 6)
+                                          .frame(maxWidth: .infinity, alignment: .leading)
+                                          .background(
+                                              RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                                  .fill(tokens.elevatedSurface.opacity(0.65))
+                                          )
+                                          .overlay(
+                                              RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                                  .strokeBorder(tokens.hairline, lineWidth: 0.75)
+                                          )
+                                          .padding(.horizontal, 10)
+                                      }
+                                      .buttonStyle(.plain)
+                                  }
+                              }
+                          }
+
+                          // Section 01 // Workspaces
+                          VStack(alignment: .leading, spacing: 4) {
+                              HStack {
+                                  Text("01 // WORKSPACES")
+                                      .font(typo.mono(size: 9.5, weight: .semibold))
+                                      .tracking(0.8)
+                                      .foregroundColor(tokens.mutedText)
+                                  Spacer()
+                                  Button {
+                                      store.isNewWorkspaceSheetPresented = true
+                                  } label: {
+                                      Text("+")
+                                          .font(typo.mono(size: 12, weight: .semibold))
+                                          .foregroundColor(tokens.secondaryText)
+                                          .frame(width: 18, height: 18)
+                                  }
+                                  .buttonStyle(.plain)
+                                  .help("New Workspace")
+                              }
+                              .padding(.horizontal, 14)
+
+                              if store.folders.isEmpty {
+                                  Button {
+                                      store.isNewWorkspaceSheetPresented = true
+                                  } label: {
+                                      Text("Add workspace…")
+                                          .font(typo.sans(size: 11.5))
+                                          .foregroundColor(tokens.mutedText)
+                                          .padding(.horizontal, 14)
+                                          .padding(.vertical, 3)
+                                  }
+                                  .buttonStyle(.plain)
+                              } else {
+                                  ForEach(store.folders.indices, id: \.self) { fIdx in
+                                      let folder = store.folders[fIdx]
+                                      let folderChats = store.sessions.filter {
+                                          !$0.isTrashed && $0.folderID == folder.id && (searchQuery.isEmpty || $0.title.lowercased().contains(searchQuery))
+                                      }
+
+                                      VStack(alignment: .leading, spacing: 2) {
+                                          if renamingFolderID == folder.id {
+                                              HStack(spacing: 6) {
+                                                  TextField("Workspace", text: $folderRenameDraft)
+                                                      .textFieldStyle(.plain)
+                                                      .font(typo.sans(size: 12, weight: .medium))
+                                                      .foregroundColor(tokens.primaryText)
+                                                      .focused($isFolderRenameFocused)
+                                                      .onSubmit {
+                                                          store.renameWorkspace(folderID: folder.id, newName: folderRenameDraft)
+                                                          renamingFolderID = nil
+                                                      }
+                                                      .onExitCommand { renamingFolderID = nil }
+
+                                                  Button("OK") {
+                                                      store.renameWorkspace(folderID: folder.id, newName: folderRenameDraft)
+                                                      renamingFolderID = nil
+                                                  }
+                                                  .font(typo.mono(size: 9.5, weight: .semibold))
+                                                  .buttonStyle(.plain)
+                                              }
+                                              .padding(.horizontal, 14)
+                                              .frame(height: 26)
+                                          } else {
+                                              HStack(spacing: 6) {
+                                                  Button {
+                                                      withAnimation(.easeOut(duration: 0.12)) {
+                                                          store.folders[fIdx].isExpanded.toggle()
+                                                      }
