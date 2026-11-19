@@ -4456,6 +4456,7 @@ public final class WorkstationStore: ObservableObject {
             var evalDurationNs: Int64? = nil
             var doneReasonFromEngine: String = ""
 
+            @MainActor
             func drainStream(_ stream: URLSession.AsyncBytes) async throws {
                 for try await line in stream.lines {
                     if Task.isCancelled || self.activeGenerationID != myGenerationID { break }
